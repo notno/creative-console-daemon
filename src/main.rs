@@ -104,7 +104,8 @@ async fn main() {
 
     // Run daemon
     tracing::info!("Starting Creative Console daemon");
-    let exit_code = daemon::run(config, shutdown, cli.dry_run).await;
+    let config_path = std::fs::canonicalize(&cli.config).unwrap_or_else(|_| cli.config.clone());
+    let exit_code = daemon::run(config, shutdown, cli.dry_run, Some(config_path)).await;
 
     match exit_code {
         0 => tracing::info!("Clean shutdown"),

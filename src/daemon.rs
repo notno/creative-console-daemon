@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
 use crate::actions::media_keys;
@@ -19,9 +21,41 @@ const DEBOUNCE_MS: u64 = 100;
 /// How often to poll OBS for state changes (seconds).
 const STATE_POLL_INTERVAL_SECS: u64 = 2;
 
-/// Run the main daemon event loop.
-/// Returns the process exit code (0 = clean shutdown, 2 = device disconnected).
-pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool) -> i32 {
+/// Spawn a file watcher for config hot-reload.
+/// Returns an mpsc receiver that fires when the config file is modified.
+fn spawn_config_watcher(config_path: &PathBuf) -> Option<mpsc::Receiver<()>> {
+    let (tx, rx) = mpsc::channel(1);
+    let path = config_path.clone();
+
+    let mut watcher = match notify::recommended_watcher(move |res: Result<notify::Event, _>| {
+        if let Ok(event) = res {
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                let _ = tx.blocking_send(());
+            }
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("Failed to create config file watcher: {e}");
+            return None;
+        }
+    };
+
+    // Watch the parent directory (some editors write to a temp file then rename)
+    let watch_path = path.parent().unwrap_or(&path);
+    if let Err(e) = watcher.watch(watch_path.as_ref(), RecursiveMode::NonRecursive) {
+        tracing::warn!("Failed to watch config directory: {e}");
+        return None;
+    }
+
+    // Keep the watcher alive by leaking it (it runs until process exit)
+    std::mem::forget(watcher);
+    tracing::info!("Config hot-reload enabled (watching {:?})", path);
+    Some(rx)
+}
+
+/// Run the main daemon event loop with optional config path for hot-reload.
+pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool, config_path: Option<PathBuf>) -> i32 {
     // Open device and spawn HID reader thread
     let rx = match device::spawn_reader(&config.device, shutdown.clone()) {
         Ok(rx) => rx,
@@ -66,12 +100,17 @@ pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool) -> i3
     let mut current_page: u16 = 1;
     tracing::info!(pages = page_count, "Page support initialized");
 
+    // Config hot-reload watcher
+    let mut config_rx = config_path.as_ref().and_then(spawn_config_watcher);
+    let mut config = config;
+
     // Event loop
     run_event_loop(
-        rx, &config, &mut obs_client, &webhook_client,
+        rx, &mut config, &mut obs_client, &webhook_client,
         &mut last_down, &shutdown, dry_run,
         lcd.as_ref(), &mute_inputs, &mut button_active,
-        &mut current_page, page_count,
+        &mut current_page,
+        &mut config_rx, config_path.as_ref(),
     ).await
 }
 
@@ -178,7 +217,7 @@ fn shorten_obs_command(cmd: &str) -> String {
 
 async fn run_event_loop(
     mut rx: mpsc::Receiver<ButtonEvent>,
-    config: &Config,
+    config: &mut Config,
     obs_client: &mut ObsClient,
     webhook_client: &WebhookClient,
     last_down: &mut HashMap<u8, Instant>,
@@ -188,11 +227,15 @@ async fn run_event_loop(
     mute_inputs: &[String],
     button_active: &mut HashMap<u8, bool>,
     current_page: &mut u16,
-    page_count: u16,
+    config_rx: &mut Option<mpsc::Receiver<()>>,
+    config_path: Option<&PathBuf>,
 ) -> i32 {
-    let has_obs_buttons = config.button.iter().any(|b| matches!(&b.action, Action::Obs { .. }));
+    let mut has_obs_buttons = config.button.iter().any(|b| matches!(&b.action, Action::Obs { .. }));
     let mut poll_interval = tokio::time::interval(Duration::from_secs(STATE_POLL_INTERVAL_SECS));
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Reload debounce: ignore rapid file change events
+    let mut last_reload = Instant::now();
 
     loop {
         tokio::select! {
@@ -212,13 +255,12 @@ async fn run_event_loop(
                         last_down.insert(config_id, now);
 
                         // Handle page navigation (PageLeft=10, PageRight=11)
+                        let page_count = config.page_count();
                         if page_count > 1 && (config_id == 10 || config_id == 11) && !config.has_page_button_action(config_id) {
                             let old_page = *current_page;
                             if config_id == 10 {
-                                // PageLeft: go back (wrap around)
                                 *current_page = if *current_page <= 1 { page_count } else { *current_page - 1 };
                             } else {
-                                // PageRight: go forward (wrap around)
                                 *current_page = if *current_page >= page_count { 1 } else { *current_page + 1 };
                             }
                             tracing::info!(from = old_page, to = *current_page, "Page changed");
@@ -238,7 +280,6 @@ async fn run_event_loop(
                             tracing::info!(button = %btn, "Dry run: skipping action dispatch");
                         } else if let Some(mapping) = mapping {
                             dispatch_mapping(mapping, obs_client, webhook_client).await;
-                            // Immediately poll state after action to update LCD faster
                             if has_obs_buttons {
                                 if let Some(lcd) = lcd {
                                     update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
@@ -265,6 +306,48 @@ async fn run_event_loop(
             _ = poll_interval.tick(), if has_obs_buttons && lcd.is_some() && !dry_run => {
                 if let Some(lcd) = lcd {
                     update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
+                }
+            }
+            Some(()) = async {
+                match config_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                // Debounce: editors often trigger multiple events
+                if last_reload.elapsed() < Duration::from_millis(500) {
+                    continue;
+                }
+                last_reload = Instant::now();
+
+                if let Some(path) = config_path {
+                    // Small delay for editors that write-then-rename
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    match Config::load(path) {
+                        Ok(new_config) => {
+                            tracing::info!("Config reloaded successfully");
+                            *config = new_config;
+                            has_obs_buttons = config.button.iter().any(|b| matches!(&b.action, Action::Obs { .. }));
+
+                            // Clamp current page
+                            let page_count = config.page_count();
+                            if *current_page > page_count {
+                                *current_page = 1;
+                            }
+
+                            // Update OBS client config
+                            *obs_client = ObsClient::new(config.obs.clone());
+
+                            // Re-render LCD
+                            if let Some(lcd) = lcd {
+                                button_active.clear();
+                                render_page_buttons(config, lcd, *current_page, button_active);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Config reload failed (keeping current config): {e}");
+                        }
+                    }
                 }
             }
             _ = tokio::signal::ctrl_c() => {
