@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::actions;
+use crate::actions::media_keys;
 use crate::actions::obs::{ObsClient, ObsState};
 use crate::actions::webhook::WebhookClient;
 use crate::config::{Action, ButtonMapping, Config};
@@ -34,7 +34,7 @@ pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool) -> i3
     // Initialize LCD
     let lcd = open_lcd(&config);
     if let Some(ref lcd) = lcd {
-        render_all_buttons(&config, lcd, &HashMap::new());
+        render_page_buttons(&config, lcd, 1, &HashMap::new());
     }
 
     // Collect input names that need mute tracking
@@ -61,11 +61,17 @@ pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool) -> i3
     // Track which buttons are currently in "active" state
     let mut button_active: HashMap<u8, bool> = HashMap::new();
 
+    // Page navigation state
+    let page_count = config.page_count();
+    let mut current_page: u16 = 1;
+    tracing::info!(pages = page_count, "Page support initialized");
+
     // Event loop
     run_event_loop(
         rx, &config, &mut obs_client, &webhook_client,
         &mut last_down, &shutdown, dry_run,
         lcd.as_ref(), &mute_inputs, &mut button_active,
+        &mut current_page, page_count,
     ).await
 }
 
@@ -126,14 +132,6 @@ fn render_button(mapping: &ButtonMapping, lcd: &LcdWriter, active: bool) {
     }
 }
 
-/// Render all buttons with their current active states.
-fn render_all_buttons(config: &Config, lcd: &LcdWriter, active_states: &HashMap<u8, bool>) {
-    for mapping in &config.button {
-        let active = active_states.get(&mapping.id).copied().unwrap_or(false);
-        render_button(mapping, lcd, active);
-    }
-}
-
 /// Determine if a button's action is currently "active" based on OBS state.
 fn is_button_active(mapping: &ButtonMapping, obs_state: &ObsState) -> bool {
     match &mapping.action {
@@ -189,6 +187,8 @@ async fn run_event_loop(
     lcd: Option<&LcdWriter>,
     mute_inputs: &[String],
     button_active: &mut HashMap<u8, bool>,
+    current_page: &mut u16,
+    page_count: u16,
 ) -> i32 {
     let has_obs_buttons = config.button.iter().any(|b| matches!(&b.action, Action::Obs { .. }));
     let mut poll_interval = tokio::time::interval(Duration::from_secs(STATE_POLL_INTERVAL_SECS));
@@ -211,18 +211,41 @@ async fn run_event_loop(
                         }
                         last_down.insert(config_id, now);
 
-                        tracing::info!(button = %btn, config_id, "Button pressed");
+                        // Handle page navigation (PageLeft=10, PageRight=11)
+                        if page_count > 1 && (config_id == 10 || config_id == 11) && !config.has_page_button_action(config_id) {
+                            let old_page = *current_page;
+                            if config_id == 10 {
+                                // PageLeft: go back (wrap around)
+                                *current_page = if *current_page <= 1 { page_count } else { *current_page - 1 };
+                            } else {
+                                // PageRight: go forward (wrap around)
+                                *current_page = if *current_page >= page_count { 1 } else { *current_page + 1 };
+                            }
+                            tracing::info!(from = old_page, to = *current_page, "Page changed");
+                            if let Some(lcd) = lcd {
+                                button_active.clear();
+                                render_page_buttons(config, lcd, *current_page, button_active);
+                            }
+                            continue;
+                        }
+
+                        // Find mapping on the current page
+                        let mapping = config.find_button(*current_page, config_id);
+
+                        tracing::info!(button = %btn, config_id, page = *current_page, "Button pressed");
 
                         if dry_run {
                             tracing::info!(button = %btn, "Dry run: skipping action dispatch");
-                        } else {
-                            actions::dispatch(btn, config, obs_client, webhook_client).await;
+                        } else if let Some(mapping) = mapping {
+                            dispatch_mapping(mapping, obs_client, webhook_client).await;
                             // Immediately poll state after action to update LCD faster
                             if has_obs_buttons {
                                 if let Some(lcd) = lcd {
-                                    update_button_states(config, obs_client, lcd, mute_inputs, button_active).await;
+                                    update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
                                 }
                             }
+                        } else {
+                            tracing::debug!(config_id, page = *current_page, "No mapping on this page");
                         }
                     }
                     Some(ButtonEvent::Up(btn)) => {
@@ -241,7 +264,7 @@ async fn run_event_loop(
             }
             _ = poll_interval.tick(), if has_obs_buttons && lcd.is_some() && !dry_run => {
                 if let Some(lcd) = lcd {
-                    update_button_states(config, obs_client, lcd, mute_inputs, button_active).await;
+                    update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -254,9 +277,52 @@ async fn run_event_loop(
     }
 }
 
+/// Render all LCD buttons for a given page.
+fn render_page_buttons(config: &Config, lcd: &LcdWriter, page: u16, active_states: &HashMap<u8, bool>) {
+    // Clear buttons that have no mapping on this page
+    let page_buttons = config.buttons_on_page(page);
+    let mapped_ids: std::collections::HashSet<u8> = page_buttons.iter().map(|b| b.id).collect();
+    for id in 1..=9u8 {
+        if !mapped_ids.contains(&id) {
+            let _ = lcd.clear_button(id);
+        }
+    }
+    // Render mapped buttons
+    for mapping in &page_buttons {
+        let active = active_states.get(&mapping.id).copied().unwrap_or(false);
+        render_button(mapping, lcd, active);
+    }
+}
+
+/// Dispatch an action from a specific ButtonMapping.
+async fn dispatch_mapping(
+    mapping: &ButtonMapping,
+    obs_client: &mut ObsClient,
+    webhook_client: &WebhookClient,
+) {
+    match &mapping.action {
+        Action::Obs { command, params } => {
+            if let Err(e) = obs_client.execute(command, params).await {
+                tracing::warn!(command, error = %e, "OBS action failed");
+            }
+        }
+        Action::Webhook { method, url, body, headers } => {
+            if let Err(e) = webhook_client.send(method, url, body.as_deref(), headers).await {
+                tracing::warn!(url, error = %e, "Webhook action failed");
+            }
+        }
+        Action::Media { key } => {
+            if let Err(e) = media_keys::send_media_key(key) {
+                tracing::warn!(key, error = %e, "Media key action failed");
+            }
+        }
+    }
+}
+
 /// Poll OBS state and update LCD buttons whose active state has changed.
 async fn update_button_states(
     config: &Config,
+    current_page: u16,
     obs_client: &mut ObsClient,
     lcd: &LcdWriter,
     mute_inputs: &[String],
@@ -267,10 +333,7 @@ async fn update_button_states(
         None => return,
     };
 
-    for mapping in &config.button {
-        if mapping.id < 1 || mapping.id > 9 {
-            continue;
-        }
+    for mapping in config.buttons_on_page(current_page) {
         if !matches!(&mapping.action, Action::Obs { .. }) {
             continue;
         }

@@ -64,6 +64,9 @@ fn default_obs_port() -> u16 {
 #[derive(Debug, Deserialize)]
 pub struct ButtonMapping {
     pub id: u8,
+    /// Page number (default: 1). Same button ID can appear on different pages.
+    #[serde(default = "default_page")]
+    pub page: u16,
     /// Optional label text to display on the LCD button (inactive/default state).
     pub label: Option<String>,
     /// Optional image file path to display on the LCD button.
@@ -84,32 +87,36 @@ pub struct ButtonMapping {
     pub action: Action,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "action", rename_all = "lowercase")]
-pub enum Action {
-    Obs {
-        command: String,
-        #[serde(default)]
-        params: HashMap<String, toml::Value>,
-    },
-    Webhook {
-        #[serde(default = "default_method")]
-        method: String,
-        url: String,
-        body: Option<String>,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-    Media {
-        key: String,
-    },
-}
-
-fn default_method() -> String {
-    "POST".to_string()
+fn default_page() -> u16 {
+    1
 }
 
 impl Config {
+    /// Get the total number of pages defined in the config.
+    pub fn page_count(&self) -> u16 {
+        self.button.iter().map(|b| b.page).max().unwrap_or(1)
+    }
+
+    /// Get button mappings for a specific page (LCD buttons only, ids 1-9).
+    pub fn buttons_on_page(&self, page: u16) -> Vec<&ButtonMapping> {
+        self.button
+            .iter()
+            .filter(|b| b.page == page && b.id >= 1 && b.id <= 9)
+            .collect()
+    }
+
+    /// Find the mapping for a button ID on a given page.
+    pub fn find_button(&self, page: u16, config_id: u8) -> Option<&ButtonMapping> {
+        self.button
+            .iter()
+            .find(|b| b.page == page && b.id == config_id)
+    }
+
+    /// Check if PageLeft (10) or PageRight (11) have an explicit action mapping.
+    pub fn has_page_button_action(&self, config_id: u8) -> bool {
+        self.button.iter().any(|b| b.id == config_id)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let content =
             std::fs::read_to_string(path).with_context(|| format!("Failed to read config: {}", path.display()))?;
@@ -138,6 +145,31 @@ impl Config {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum Action {
+    Obs {
+        command: String,
+        #[serde(default)]
+        params: HashMap<String, toml::Value>,
+    },
+    Webhook {
+        #[serde(default = "default_method")]
+        method: String,
+        url: String,
+        body: Option<String>,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+    Media {
+        key: String,
+    },
+}
+
+fn default_method() -> String {
+    "POST".to_string()
 }
 
 const VALID_MEDIA_KEYS: &[&str] = &[
