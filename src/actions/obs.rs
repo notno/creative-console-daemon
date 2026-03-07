@@ -4,6 +4,14 @@ use std::collections::HashMap;
 
 use crate::config::ObsConfig;
 
+/// Snapshot of OBS state for dynamic button feedback.
+#[derive(Debug, Clone, Default)]
+pub struct ObsState {
+    pub recording: bool,
+    pub current_scene: String,
+    pub muted_inputs: HashMap<String, bool>,
+}
+
 /// Wrapper around obws::Client that handles lazy connection and reconnection.
 pub struct ObsClient {
     config: Option<ObsConfig>,
@@ -56,6 +64,43 @@ impl ObsClient {
             self.client = None;
         }
         result
+    }
+
+    /// Poll current OBS state for dynamic button feedback.
+    /// Returns None if OBS is not configured or not connected.
+    pub async fn poll_state(&mut self, mute_inputs: &[String]) -> Option<ObsState> {
+        let client = match self.ensure_connected().await {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+
+        let recording = client
+            .recording()
+            .status()
+            .await
+            .map(|s| s.active)
+            .unwrap_or(false);
+
+        let current_scene = client
+            .scenes()
+            .current_program_scene()
+            .await
+            .map(|s| s.id.name)
+            .unwrap_or_default();
+
+        let mut muted_inputs_map = HashMap::new();
+        for input_name in mute_inputs {
+            let input_id = InputId::Name(input_name);
+            if let Ok(muted) = client.inputs().muted(input_id).await {
+                muted_inputs_map.insert(input_name.clone(), muted);
+            }
+        }
+
+        Some(ObsState {
+            recording,
+            current_scene,
+            muted_inputs: muted_inputs_map,
+        })
     }
 
     async fn execute_inner(&mut self, command: &str, params: &HashMap<String, toml::Value>) -> Result<()> {

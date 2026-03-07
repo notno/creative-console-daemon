@@ -64,7 +64,7 @@ fn default_obs_port() -> u16 {
 #[derive(Debug, Deserialize)]
 pub struct ButtonMapping {
     pub id: u8,
-    /// Optional label text to display on the LCD button.
+    /// Optional label text to display on the LCD button (inactive/default state).
     pub label: Option<String>,
     /// Optional image file path to display on the LCD button.
     pub icon: Option<String>,
@@ -72,6 +72,14 @@ pub struct ButtonMapping {
     pub fg: Option<[u8; 3]>,
     /// Label background color as [R, G, B] (default: black).
     pub bg: Option<[u8; 3]>,
+    /// Label text when action is active (e.g., recording in progress).
+    pub active_label: Option<String>,
+    /// Foreground color when active.
+    pub active_fg: Option<[u8; 3]>,
+    /// Background color when active.
+    pub active_bg: Option<[u8; 3]>,
+    /// Icon file when active.
+    pub active_icon: Option<String>,
     #[serde(flatten)]
     pub action: Action,
 }
