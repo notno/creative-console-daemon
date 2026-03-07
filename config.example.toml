@@ -1,0 +1,61 @@
+# Creative Console Daemon Configuration
+# All button-to-action mappings are defined here.
+
+# Device settings (optional - defaults shown)
+[device]
+# vendor_id = 0x046D      # Logitech
+# product_id = 0xC354     # MX Creative Keypad
+# usage_page = 0xFF00     # Vendor-specific HID interface
+
+# OBS WebSocket connection (optional - only needed for OBS actions)
+[obs]
+host = "localhost"
+port = 4455
+# password = "your-obs-websocket-password"
+
+# Button Mappings
+# Button IDs: 1-9 = LCD buttons (3x3 grid, left-to-right, top-to-bottom)
+#              10 = Page Left (back arrow)
+#              11 = Page Right (forward arrow)
+
+# Example: Switch OBS scene
+[[button]]
+id = 1
+action = "obs"
+command = "SetCurrentProgramScene"
+params = { sceneName = "Camera 1" }
+
+# Example: Toggle OBS recording
+[[button]]
+id = 2
+action = "obs"
+command = "ToggleRecord"
+
+# Example: Media play/pause
+[[button]]
+id = 3
+action = "media"
+key = "play_pause"
+# Valid keys: play_pause, volume_up, volume_down, mute, next_track, prev_track
+
+# Example: Volume up
+[[button]]
+id = 4
+action = "media"
+key = "volume_up"
+
+# Example: HTTP webhook
+[[button]]
+id = 5
+action = "webhook"
+method = "POST"
+url = "http://localhost:8080/api/trigger"
+body = '{"action": "notify"}'
+# headers = { "Authorization" = "Bearer token123" }
+
+# Example: Simple GET webhook
+[[button]]
+id = 6
+action = "webhook"
+method = "GET"
+url = "http://localhost:8080/api/status"
