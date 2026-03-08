@@ -3,6 +3,14 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceType {
+    #[default]
+    MxCreative,
+    StreamdeckXl,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -10,10 +18,14 @@ pub struct Config {
     pub obs: Option<ObsConfig>,
     #[serde(default)]
     pub button: Vec<ButtonMapping>,
+    #[serde(default)]
+    pub webhook_poll: Vec<WebhookPollConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceConfig {
+    #[serde(default)]
+    pub device_type: DeviceType,
     #[serde(default = "default_vid")]
     pub vendor_id: u16,
     #[serde(default = "default_pid")]
@@ -22,17 +34,54 @@ pub struct DeviceConfig {
     pub usage_page: u16,
     /// Optional usage filter — if set, also match on HID usage within the usage page.
     pub usage: Option<u16>,
+    /// Serial number for Stream Deck device selection (required for streamdeck_xl).
+    pub serial: Option<String>,
 }
 
 impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
+            device_type: DeviceType::default(),
             vendor_id: default_vid(),
             product_id: default_pid(),
             usage_page: default_usage_page(),
             usage: None,
+            serial: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WebhookPollConfig {
+    /// URL to poll (e.g. "http://localhost:3000/api/spotlight")
+    pub url: String,
+    /// Poll interval in seconds (default: 2)
+    #[serde(default = "default_poll_interval")]
+    pub interval_secs: u64,
+    /// Map of button config_id -> JSON path to extract boolean active state.
+    /// e.g. { 1 = "slots.1.spotlit", 2 = "slots.2.spotlit" }
+    /// TOML keys are strings; parsed to u8 at load time.
+    #[serde(default, deserialize_with = "deserialize_button_map")]
+    pub buttons: HashMap<u8, String>,
+}
+
+fn default_poll_interval() -> u64 {
+    2
+}
+
+fn deserialize_button_map<'de, D>(deserializer: D) -> std::result::Result<HashMap<u8, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let string_map: HashMap<String, String> = HashMap::deserialize(deserializer)?;
+    string_map
+        .into_iter()
+        .map(|(k, v)| {
+            k.parse::<u8>()
+                .map(|id| (id, v))
+                .map_err(|_| serde::de::Error::custom(format!("invalid button ID '{k}': expected 1-32")))
+        })
+        .collect()
 }
 
 fn default_vid() -> u16 {
@@ -127,10 +176,14 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        let max_button = match self.device.device_type {
+            DeviceType::MxCreative => 11,
+            DeviceType::StreamdeckXl => 32,
+        };
         for mapping in &self.button {
-            if mapping.id < 1 || mapping.id > 11 {
+            if mapping.id < 1 || mapping.id > max_button {
                 anyhow::bail!(
-                    "Button ID {} is out of range. Valid range: 1-11 (1-9 for LCD buttons, 10=PageLeft, 11=PageRight)",
+                    "Button ID {} is out of range. Valid range: 1-{max_button}",
                     mapping.id
                 );
             }
@@ -141,6 +194,11 @@ impl Config {
                 if !url.starts_with("http://") && !url.starts_with("https://") {
                     anyhow::bail!("Webhook URL must start with http:// or https://: {url}");
                 }
+            }
+        }
+        for poll in &self.webhook_poll {
+            if !poll.url.starts_with("http://") && !poll.url.starts_with("https://") {
+                anyhow::bail!("Webhook poll URL must start with http:// or https://: {}", poll.url);
             }
         }
         Ok(())

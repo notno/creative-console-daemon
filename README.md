@@ -1,23 +1,29 @@
 # Creative Console Daemon
 
-A Rust background daemon that reads button presses from the **Logitech MX Creative Console** (Keypad) via USB HID and dispatches configurable actions: OBS control, HTTP webhooks, and media keys.
+A Rust background daemon that reads button presses from the **Logitech MX Creative Console** or **Elgato Stream Deck XL** via USB HID and dispatches configurable actions: OBS control, HTTP webhooks, media keys, and webhook polling for reactive button states.
 
 Built as a replacement for Logitech Options+, which is broken and limited.
 
 ## Features
 
-- **Direct HID communication** — no dependency on Logitech Options+
+- **Dual device support** — MX Creative Console (Keypad) and Stream Deck XL
+- **Direct HID communication** — no dependency on Logitech Options+ or Elgato Stream Deck software
 - **OBS control** via obs-websocket v5 (switch scenes, start/stop recording, toggle mute)
-- **HTTP webhooks** — trigger POST/GET requests on button press
+- **HTTP webhooks** — trigger POST/GET/DELETE requests on button press
+- **Webhook polling** — periodically poll a JSON endpoint to drive button active states (e.g. spotlight indicators)
 - **Media keys** — play/pause, volume, next/prev track via Windows SendInput
+- **LCD button labels** — render text labels on both MX Creative and Stream Deck button screens
 - **TOML configuration** — define all button mappings in a simple config file
+- **Config hot-reload** — edit config.toml while running, changes apply automatically
 - **Supervisor script** — auto-restart on device disconnect
 
 ## Requirements
 
 - Windows 11
 - Rust toolchain (for building)
-- Logitech MX Creative Console (Keypad, USB-C connected)
+- One or both of:
+  - Logitech MX Creative Console (Keypad, USB-C connected)
+  - Elgato Stream Deck XL (USB connected)
 - OBS with obs-websocket plugin (for OBS actions)
 
 ## Building
@@ -30,24 +36,51 @@ The binary will be at `target/release/creative-console-daemon.exe`.
 
 ## Configuration
 
-Copy `config.example.toml` to `config.toml` and edit:
+Copy `config.example.toml` (MX Creative) or `config.example.streamdeck.toml` (Stream Deck XL) to `config.toml` and edit.
+
+### Device Selection
+
+Select your device with the `device_type` field:
 
 ```toml
-# Device settings (optional — defaults to MX Creative Keypad)
 [device]
-# vendor_id = 0x046D
-# product_id = 0xC354
-# usage_page = 0xFF00
+device_type = "mx_creative"    # Logitech MX Creative Console (default)
+# device_type = "streamdeck_xl"  # Elgato Stream Deck XL
+```
 
-# OBS WebSocket connection (optional)
+For Stream Deck, you can optionally specify a serial number to target a specific device:
+
+```toml
+[device]
+device_type = "streamdeck_xl"
+serial = "AL12H1A00001"
+```
+
+### Using Both Devices
+
+Run two instances of the daemon with separate config files — one per device:
+
+```bash
+# Terminal 1: MX Creative Console
+creative-console-daemon --config config.mx.toml
+
+# Terminal 2: Stream Deck XL
+creative-console-daemon --config config.streamdeck.toml
+```
+
+Each instance independently connects to its configured device. They can share the same OBS WebSocket, webhook endpoints, and ttrpg-ai server without conflict. This lets you use the MX Creative for OBS/media controls while the Stream Deck XL handles spotlight and session buttons (or any other split you prefer).
+
+### MX Creative Console Example
+
+```toml
+[device]
+device_type = "mx_creative"
+
 [obs]
 host = "localhost"
 port = 4455
-# password = "your-password"
 
-# Button mappings
-# IDs: 1-9 = LCD buttons (3x3 grid), 10 = PageLeft, 11 = PageRight
-
+# Button IDs: 1-9 = LCD buttons (3x3 grid), 10 = PageLeft, 11 = PageRight
 [[button]]
 id = 1
 action = "obs"
@@ -63,13 +96,51 @@ command = "ToggleRecord"
 id = 3
 action = "media"
 key = "play_pause"
+```
+
+### Stream Deck XL Example
+
+```toml
+[device]
+device_type = "streamdeck_xl"
+
+# Button IDs: 1-32 (8x4 grid, left-to-right, top-to-bottom)
+# Row 1: 1-8, Row 2: 9-16, Row 3: 17-24, Row 4: 25-32
 
 [[button]]
-id = 4
-action = "webhook"
+id = 1
+label = "Slot 1"
+[button.action]
+type = "webhook"
 method = "POST"
-url = "http://localhost:8080/api/trigger"
+url = "http://localhost:3000/api/spotlight/1"
+
+[[button]]
+id = 25
+label = "PTT ON"
+[button.action]
+type = "webhook"
+method = "POST"
+url = "http://localhost:3000/api/ptt/on"
 ```
+
+### Webhook Polling
+
+Poll a JSON endpoint periodically to update button active states (highlighted/dimmed). Useful for showing live state like which spotlight slot is active:
+
+```toml
+[[webhook_poll]]
+url = "http://localhost:3000/api/spotlight"
+interval_secs = 2
+
+[webhook_poll.buttons]
+# button_id = "json.path.to.boolean"
+1 = "slots.1.spotlit"
+2 = "slots.2.spotlit"
+3 = "slots.3.spotlit"
+```
+
+The poller fetches the URL, walks each dot-separated JSON path, and treats the result as a boolean. Active buttons are rendered with a highlight color; inactive buttons are dimmed.
 
 ### Supported Actions
 
@@ -83,17 +154,27 @@ url = "http://localhost:8080/api/trigger"
 
 **Media keys:** `play_pause`, `volume_up`, `volume_down`, `mute`, `next_track`, `prev_track`
 
+### Button ID Reference
+
+| Device | Button IDs | Layout |
+|--------|-----------|--------|
+| MX Creative | 1-9 (LCD), 10-11 (page) | 3x3 grid + 2 page buttons |
+| Stream Deck XL | 1-32 | 8x4 grid |
+
 ## Usage
 
 ```bash
 # Run the daemon
 creative-console-daemon --config config.toml
 
-# List connected HID devices (for debugging)
+# List all connected devices (MX Creative + Stream Deck)
 creative-console-daemon --list-devices
 
-# Raw dump mode (print HID reports as hex)
+# Raw dump mode (print HID reports as hex, MX Creative only)
 creative-console-daemon --raw-dump --config config.toml
+
+# Diagnostic mode (probe HID interfaces)
+creative-console-daemon --diag
 
 # Dry run (log button presses, don't dispatch actions)
 creative-console-daemon --dry-run --config config.toml
@@ -131,14 +212,14 @@ RUST_LOG=debug creative-console-daemon --config config.toml
 
 ## Important Notes
 
-- **Stop Logitech Options+** before running this daemon. While HID access is non-exclusive, Options+ may consume button events.
-- The device must be connected via **USB-C** (the Keypad). The Dialpad (Bluetooth) is not supported in this version.
-- Button IDs 1-9 correspond to the 3x3 LCD button grid (left-to-right, top-to-bottom). IDs 10-11 are the page/arrow buttons.
+- **Stop Logitech Options+** before running the MX Creative daemon. While HID access is non-exclusive, Options+ may consume button events.
+- **Stop Elgato Stream Deck software** before running the Stream Deck daemon, for the same reason.
+- The MX Creative Keypad must be connected via **USB-C**. The Dialpad (Bluetooth) is not supported.
+- Stream Deck XL is auto-detected; if multiple Stream Decks are connected, use the `serial` field to target a specific one.
 
 ## Known Limitations
 
-- Keypad only (no Dialpad/dial support)
-- No LCD screen image output
+- MX Creative: Keypad only (no Dialpad/dial support)
+- Stream Deck: XL tested; other models may work but are untested
 - No per-application profiles
-- No config hot-reload (restart daemon to apply changes)
 - Windows only

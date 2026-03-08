@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,10 +10,12 @@ use tokio::sync::mpsc;
 use crate::actions::media_keys;
 use crate::actions::obs::{ObsClient, ObsState};
 use crate::actions::webhook::WebhookClient;
-use crate::config::{Action, ButtonMapping, Config};
+use crate::actions::webhook_poll::WebhookPoller;
+use crate::config::{Action, ButtonMapping, Config, DeviceType};
 use crate::hid::device;
 use crate::hid::lcd::LcdWriter;
 use crate::hid::protocol::ButtonEvent;
+use crate::hid::streamdeck;
 
 /// Debounce interval: ignore repeated Down events for the same button within this window.
 const DEBOUNCE_MS: u64 = 100;
@@ -23,9 +25,9 @@ const STATE_POLL_INTERVAL_SECS: u64 = 2;
 
 /// Spawn a file watcher for config hot-reload.
 /// Returns an mpsc receiver that fires when the config file is modified.
-fn spawn_config_watcher(config_path: &PathBuf) -> Option<mpsc::Receiver<()>> {
+fn spawn_config_watcher(config_path: &Path) -> Option<mpsc::Receiver<()>> {
     let (tx, rx) = mpsc::channel(1);
-    let path = config_path.clone();
+    let path = config_path.to_path_buf();
 
     let mut watcher = match notify::recommended_watcher(move |res: Result<notify::Event, _>| {
         if let Ok(event) = res {
@@ -54,21 +56,51 @@ fn spawn_config_watcher(config_path: &PathBuf) -> Option<mpsc::Receiver<()>> {
     Some(rx)
 }
 
+/// Holds the optional Stream Deck connection for LCD rendering.
+enum DeviceHandle {
+    MxCreative(Option<LcdWriter>),
+    StreamDeck(elgato_streamdeck::AsyncStreamDeck),
+}
+
 /// Run the main daemon event loop with optional config path for hot-reload.
 pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool, config_path: Option<PathBuf>) -> i32 {
-    // Open device and spawn HID reader thread
-    let rx = match device::spawn_reader(&config.device, shutdown.clone()) {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!("Failed to start HID reader: {}", e);
-            return 1;
+    let device_type = config.device.device_type;
+
+    // Open device and spawn reader based on device type
+    let (rx, device_handle) = match device_type {
+        DeviceType::MxCreative => {
+            let rx = match device::spawn_reader(&config.device, shutdown.clone()) {
+                Ok(rx) => rx,
+                Err(e) => {
+                    tracing::error!("Failed to start HID reader: {}", e);
+                    return 1;
+                }
+            };
+            let lcd = open_lcd(&config);
+            (rx, DeviceHandle::MxCreative(lcd))
+        }
+        DeviceType::StreamdeckXl => {
+            let (deck, kind) = match streamdeck::connect(config.device.serial.as_deref()) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Failed to connect to Stream Deck: {}", e);
+                    return 1;
+                }
+            };
+            tracing::info!("Connected to Stream Deck {:?} ({} keys)", kind, kind.key_count());
+            let rx = streamdeck::spawn_reader(deck.clone(), shutdown.clone());
+            (rx, DeviceHandle::StreamDeck(deck))
         }
     };
 
-    // Initialize LCD
-    let lcd = open_lcd(&config);
-    if let Some(ref lcd) = lcd {
+    // Initialize LCD for MX Creative
+    if let DeviceHandle::MxCreative(Some(ref lcd)) = device_handle {
         render_page_buttons(&config, lcd, 1, &HashMap::new());
+    }
+
+    // Render initial buttons for Stream Deck
+    if let DeviceHandle::StreamDeck(ref deck) = device_handle {
+        render_streamdeck_buttons(&config, deck, 1, &HashMap::new()).await;
     }
 
     // Collect input names that need mute tracking
@@ -101,16 +133,24 @@ pub async fn run(config: Config, shutdown: Arc<AtomicBool>, dry_run: bool, confi
     tracing::info!(pages = page_count, "Page support initialized");
 
     // Config hot-reload watcher
-    let mut config_rx = config_path.as_ref().and_then(spawn_config_watcher);
+    let mut config_rx = config_path.as_deref().and_then(spawn_config_watcher);
     let mut config = config;
+
+    // Webhook poller
+    let webhook_poller = if config.webhook_poll.is_empty() {
+        None
+    } else {
+        Some(WebhookPoller::new())
+    };
 
     // Event loop
     run_event_loop(
         rx, &mut config, &mut obs_client, &webhook_client,
         &mut last_down, &shutdown, dry_run,
-        lcd.as_ref(), &mute_inputs, &mut button_active,
+        &device_handle, &mute_inputs, &mut button_active,
         &mut current_page,
-        &mut config_rx, config_path.as_ref(),
+        &mut config_rx, config_path.as_deref(),
+        webhook_poller.as_ref(),
     ).await
 }
 
@@ -176,6 +216,7 @@ fn is_button_active(mapping: &ButtonMapping, obs_state: &ObsState) -> bool {
     match &mapping.action {
         Action::Obs { command, params } => match command.as_str() {
             "ToggleRecord" | "StartRecord" | "StopRecord" => obs_state.recording,
+            "ToggleRecordPause" | "PauseRecord" | "ResumeRecord" => obs_state.recording_paused,
             "SetCurrentProgramScene" => {
                 params
                     .get("sceneName")
@@ -215,6 +256,7 @@ fn shorten_obs_command(cmd: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     mut rx: mpsc::Receiver<ButtonEvent>,
     config: &mut Config,
@@ -223,16 +265,27 @@ async fn run_event_loop(
     last_down: &mut HashMap<u8, Instant>,
     shutdown: &Arc<AtomicBool>,
     dry_run: bool,
-    lcd: Option<&LcdWriter>,
+    device_handle: &DeviceHandle,
     mute_inputs: &[String],
     button_active: &mut HashMap<u8, bool>,
     current_page: &mut u16,
     config_rx: &mut Option<mpsc::Receiver<()>>,
-    config_path: Option<&PathBuf>,
+    config_path: Option<&Path>,
+    webhook_poller: Option<&WebhookPoller>,
 ) -> i32 {
+    let lcd = match device_handle {
+        DeviceHandle::MxCreative(ref lcd) => lcd.as_ref(),
+        DeviceHandle::StreamDeck(_) => None,
+    };
     let mut has_obs_buttons = config.button.iter().any(|b| matches!(&b.action, Action::Obs { .. }));
     let mut poll_interval = tokio::time::interval(Duration::from_secs(STATE_POLL_INTERVAL_SECS));
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Webhook poll interval (use shortest configured interval, default 2s)
+    let webhook_poll_secs = config.webhook_poll.iter().map(|p| p.interval_secs).min().unwrap_or(2);
+    let mut webhook_poll_interval = tokio::time::interval(Duration::from_secs(webhook_poll_secs));
+    webhook_poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let has_webhook_polls = webhook_poller.is_some() && !config.webhook_poll.is_empty();
 
     // Reload debounce: ignore rapid file change events
     let mut last_reload = Instant::now();
@@ -264,9 +317,16 @@ async fn run_event_loop(
                                 *current_page = if *current_page >= page_count { 1 } else { *current_page + 1 };
                             }
                             tracing::info!(from = old_page, to = *current_page, "Page changed");
-                            if let Some(lcd) = lcd {
-                                button_active.clear();
-                                render_page_buttons(config, lcd, *current_page, button_active);
+                            match device_handle {
+                                DeviceHandle::MxCreative(Some(lcd)) => {
+                                    button_active.clear();
+                                    render_page_buttons(config, lcd, *current_page, button_active);
+                                }
+                                DeviceHandle::StreamDeck(deck) => {
+                                    button_active.clear();
+                                    render_streamdeck_buttons(config, deck, *current_page, button_active).await;
+                                }
+                                _ => {}
                             }
                             continue;
                         }
@@ -281,7 +341,7 @@ async fn run_event_loop(
                         } else if let Some(mapping) = mapping {
                             dispatch_mapping(mapping, obs_client, webhook_client).await;
                             if has_obs_buttons {
-                                if let Some(lcd) = lcd {
+                                if let DeviceHandle::MxCreative(Some(lcd)) = device_handle {
                                     update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
                                 }
                             }
@@ -339,13 +399,45 @@ async fn run_event_loop(
                             *obs_client = ObsClient::new(config.obs.clone());
 
                             // Re-render LCD
-                            if let Some(lcd) = lcd {
-                                button_active.clear();
-                                render_page_buttons(config, lcd, *current_page, button_active);
+                            match device_handle {
+                                DeviceHandle::MxCreative(Some(lcd)) => {
+                                    button_active.clear();
+                                    render_page_buttons(config, lcd, *current_page, button_active);
+                                }
+                                DeviceHandle::StreamDeck(deck) => {
+                                    button_active.clear();
+                                    render_streamdeck_buttons(config, deck, *current_page, button_active).await;
+                                }
+                                _ => {}
                             }
                         }
                         Err(e) => {
                             tracing::warn!("Config reload failed (keeping current config): {e}");
+                        }
+                    }
+                }
+            }
+            _ = webhook_poll_interval.tick(), if has_webhook_polls && !dry_run => {
+                if let Some(poller) = webhook_poller {
+                    for poll_config in &config.webhook_poll {
+                        let states = poller.poll(poll_config).await;
+                        for (btn_id, active) in &states {
+                            let prev = button_active.get(btn_id).copied().unwrap_or(false);
+                            if *active != prev {
+                                button_active.insert(*btn_id, *active);
+                                // Find the button mapping to re-render
+                                if let Some(mapping) = config.find_button(*current_page, *btn_id) {
+                                    match device_handle {
+                                        DeviceHandle::MxCreative(Some(lcd)) => {
+                                            render_button(mapping, lcd, *active);
+                                        }
+                                        DeviceHandle::StreamDeck(deck) => {
+                                            render_streamdeck_button_state(mapping, deck, *active).await;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -433,5 +525,77 @@ async fn update_button_states(
             button_active.insert(mapping.id, active);
             render_button(mapping, lcd, active);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream Deck rendering helpers
+// ---------------------------------------------------------------------------
+
+/// Render all buttons for a Stream Deck on a given page.
+async fn render_streamdeck_buttons(
+    config: &Config,
+    deck: &elgato_streamdeck::AsyncStreamDeck,
+    page: u16,
+    active_states: &HashMap<u8, bool>,
+) {
+    let kind = deck.kind();
+    let key_count = kind.key_count();
+    let page_buttons = config.buttons_on_page(page);
+    let mapped_ids: std::collections::HashSet<u8> = page_buttons.iter().map(|b| b.id).collect();
+
+    // Clear unmapped buttons
+    for id in 1..=key_count {
+        if !mapped_ids.contains(&id) {
+            if let Err(e) = streamdeck::clear_button(deck, id).await {
+                tracing::warn!(button = id, "Failed to clear Stream Deck button: {e}");
+            }
+        }
+    }
+
+    // Render mapped buttons
+    for mapping in &page_buttons {
+        let active = active_states.get(&mapping.id).copied().unwrap_or(false);
+        render_streamdeck_button_state(mapping, deck, active).await;
+    }
+}
+
+/// Render a single Stream Deck button in its current state.
+async fn render_streamdeck_button_state(
+    mapping: &ButtonMapping,
+    deck: &elgato_streamdeck::AsyncStreamDeck,
+    active: bool,
+) {
+    let (label, icon, fg, bg) = if active {
+        (
+            mapping.active_label.as_deref().or(mapping.label.as_deref()),
+            mapping.active_icon.as_deref().or(mapping.icon.as_deref()),
+            mapping.active_fg.unwrap_or(mapping.fg.unwrap_or([255, 255, 255])),
+            mapping.active_bg.unwrap_or(mapping.bg.unwrap_or([0, 0, 0])),
+        )
+    } else {
+        (
+            mapping.label.as_deref(),
+            mapping.icon.as_deref(),
+            mapping.fg.unwrap_or([255, 255, 255]),
+            mapping.bg.unwrap_or([0, 0, 0]),
+        )
+    };
+
+    let result = if let Some(icon_path) = icon {
+        streamdeck::write_button_file(deck, mapping.id, std::path::Path::new(icon_path)).await
+    } else if let Some(label_text) = label {
+        streamdeck::write_button_label(deck, mapping.id, label_text, fg, bg).await
+    } else {
+        let auto_label = match &mapping.action {
+            Action::Obs { command, .. } => shorten_obs_command(command),
+            Action::Media { key } => key.replace('_', " "),
+            Action::Webhook { method, .. } => method.clone(),
+        };
+        streamdeck::write_button_label(deck, mapping.id, &auto_label, fg, bg).await
+    };
+
+    if let Err(e) = result {
+        tracing::warn!(button = mapping.id, "Failed to render Stream Deck button: {e}");
     }
 }

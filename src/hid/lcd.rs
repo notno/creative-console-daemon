@@ -121,28 +121,34 @@ pub fn solid_color_image(r: u8, g: u8, b: u8) -> RgbImage {
     })
 }
 
+/// Create a text label image at a custom size (for Stream Deck compatibility).
+pub fn label_image_sized(text: &str, fg: [u8; 3], bg: [u8; 3], width: u32, height: u32) -> RgbImage {
+    label_image_impl(text, fg, bg, width, height)
+}
+
 /// Create a text label image for a button (scaled bitmap font).
 /// Uses a basic built-in 5x7 bitmap font scaled up to fill the 118x118 LCD.
 pub fn label_image(text: &str, fg: [u8; 3], bg: [u8; 3]) -> RgbImage {
-    let size = BUTTON_PX as u32;
-    let mut img = RgbImage::from_fn(size, size, |_, _| image::Rgb(bg));
+    label_image_impl(text, fg, bg, BUTTON_PX as u32, BUTTON_PX as u32)
+}
+
+fn label_image_impl(text: &str, fg: [u8; 3], bg: [u8; 3], width: u32, height: u32) -> RgbImage {
+    let mut img = RgbImage::from_fn(width, height, |_, _| image::Rgb(bg));
 
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
         return img;
     }
 
-    // Calculate scale factor to fit text in the button
-    // Each glyph is 5 wide + 1 spacing, 7 tall
     let glyph_w = 5u32;
     let glyph_h = 7u32;
     let spacing = 1u32;
     let text_glyphs_w = chars.len() as u32 * (glyph_w + spacing) - spacing;
 
-    // Scale to fit with some padding (10% margin)
-    let margin = size / 10;
-    let available_w = size - 2 * margin;
-    let available_h = size - 2 * margin;
+    let margin_w = width / 10;
+    let margin_h = height / 10;
+    let available_w = width - 2 * margin_w;
+    let available_h = height - 2 * margin_h;
     let scale_x = available_w / text_glyphs_w;
     let scale_y = available_h / glyph_h;
     let scale = scale_x.min(scale_y).max(1);
@@ -150,20 +156,19 @@ pub fn label_image(text: &str, fg: [u8; 3], bg: [u8; 3]) -> RgbImage {
     let char_w = (glyph_w + spacing) * scale;
     let total_w = chars.len() as u32 * char_w - spacing * scale;
     let total_h = glyph_h * scale;
-    let start_x = size.saturating_sub(total_w) / 2;
-    let start_y = size.saturating_sub(total_h) / 2;
+    let start_x = width.saturating_sub(total_w) / 2;
+    let start_y = height.saturating_sub(total_h) / 2;
 
     for (ci, &ch) in chars.iter().enumerate() {
         let glyph = get_glyph(ch);
         for (row, &bits) in glyph.iter().enumerate() {
             for col in 0..glyph_w {
                 if bits & (1 << (4 - col)) != 0 {
-                    // Draw a scale x scale block for each pixel
                     for dy in 0..scale {
                         for dx in 0..scale {
                             let px = start_x + ci as u32 * char_w + col * scale + dx;
                             let py = start_y + row as u32 * scale + dy;
-                            if px < size && py < size {
+                            if px < width && py < height {
                                 img.put_pixel(px, py, image::Rgb(fg));
                             }
                         }
@@ -318,13 +323,6 @@ impl LcdWriter {
         self.write_button_image(config_id, &img)
     }
 
-    /// Clear all 9 LCD buttons.
-    pub fn clear_all(&self) -> Result<()> {
-        for id in 1..=9 {
-            self.clear_button(id)?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]

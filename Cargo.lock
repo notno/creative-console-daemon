@@ -275,12 +275,14 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "elgato-streamdeck",
  "hidapi",
  "image",
  "notify",
  "obws",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
@@ -375,6 +377,17 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "elgato-streamdeck"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e86db7c0f5bbffc406f4226ea5bf900bfd818bd8e4f93482bdc1ceeb17824ac"
+dependencies = [
+ "hidapi",
+ "image",
+ "tokio",
+]
 
 [[package]]
 name = "encoding_rs"

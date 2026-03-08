@@ -8,6 +8,7 @@ use crate::config::ObsConfig;
 #[derive(Debug, Clone, Default)]
 pub struct ObsState {
     pub recording: bool,
+    pub recording_paused: bool,
     pub current_scene: String,
     pub muted_inputs: HashMap<String, bool>,
 }
@@ -74,12 +75,9 @@ impl ObsClient {
             Err(_) => return None,
         };
 
-        let recording = client
-            .recording()
-            .status()
-            .await
-            .map(|s| s.active)
-            .unwrap_or(false);
+        let rec_status = client.recording().status().await.ok();
+        let recording = rec_status.as_ref().map(|s| s.active).unwrap_or(false);
+        let recording_paused = rec_status.as_ref().map(|s| s.paused).unwrap_or(false);
 
         let current_scene = client
             .scenes()
@@ -98,6 +96,7 @@ impl ObsClient {
 
         Some(ObsState {
             recording,
+            recording_paused,
             current_scene,
             muted_inputs: muted_inputs_map,
         })
@@ -130,6 +129,18 @@ impl ObsClient {
             "ToggleRecord" => {
                 client.recording().toggle().await.context("Failed to toggle recording")?;
                 tracing::info!("Toggled OBS recording");
+            }
+            "ToggleRecordPause" => {
+                let paused = client.recording().toggle_pause().await.context("Failed to toggle recording pause")?;
+                tracing::info!(paused, "Toggled OBS recording pause");
+            }
+            "PauseRecord" => {
+                client.recording().pause().await.context("Failed to pause recording")?;
+                tracing::info!("Paused OBS recording");
+            }
+            "ResumeRecord" => {
+                client.recording().resume().await.context("Failed to resume recording")?;
+                tracing::info!("Resumed OBS recording");
             }
             "ToggleInputMute" => {
                 let input_name = params

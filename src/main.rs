@@ -76,8 +76,11 @@ async fn main() {
         };
 
         if let Err(e) = hid::device::list_devices(vid) {
-            tracing::error!("Failed to list devices: {}", e);
-            std::process::exit(1);
+            tracing::error!("Failed to list MX Creative devices: {}", e);
+        }
+        // Also list Stream Deck devices
+        if let Err(e) = hid::streamdeck::list_devices() {
+            tracing::error!("Failed to list Stream Deck devices: {}", e);
         }
         return;
     }
