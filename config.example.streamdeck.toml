@@ -16,80 +16,47 @@ device_type = "streamdeck_xl"
 # Button mappings (1-32 for Stream Deck XL, 8x4 grid)
 # Row 1: buttons 1-8, Row 2: 9-16, Row 3: 17-24, Row 4: 25-32
 
-# --- Row 1: Spotlight slots 1-8 ---
+# --- Row 1: Per-character spotlight (one button per character) ---
+# Uses /api/spotlight/char/:name for individual character control
 [[button]]
 id = 1
-label = "Slot 1"
+label = "Char 1"
 action = "webhook"
+active_fg = [255, 255, 255]
+active_bg = [255, 0, 0]
+fg = [255, 0, 0]
+bg = [255, 130, 130]
 method = "POST"
-url = "http://localhost:3000/api/spotlight/1"
+url = "http://localhost:3000/api/spotlight/char/CharacterName"
 
+# --- Row 3: Per-player spotlight (one button per player) ---
+# Uses /api/spotlight/player/:name to toggle all characters for a player
 [[button]]
-id = 2
-label = "Slot 2"
+id = 19
+label = "Player 1"
 action = "webhook"
+active_fg = [255, 255, 255]
+active_bg = [255, 0, 0]
+fg = [255, 0, 0]
+bg = [255, 130, 130]
 method = "POST"
-url = "http://localhost:3000/api/spotlight/2"
-
-[[button]]
-id = 3
-label = "Slot 3"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/spotlight/3"
-
-[[button]]
-id = 4
-label = "Slot 4"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/spotlight/4"
-
-[[button]]
-id = 5
-label = "Slot 5"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/spotlight/5"
-
-[[button]]
-id = 6
-label = "Slot 6"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/spotlight/6"
-
-[[button]]
-id = 7
-label = "Slot 7"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/spotlight/7"
-
-[[button]]
-id = 8
-label = "Slot 8"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/spotlight/8"
+url = "http://localhost:3000/api/spotlight/player/PlayerName"
 
 # --- Row 4: Transport controls ---
 [[button]]
 id = 25
-label = "PTT ON"
+label = "PTT"
 action = "webhook"
+active_fg = [255, 255, 255]
+active_bg = [255, 0, 0]
+fg = [10, 10, 10]
+bg = [150, 150, 150]
 method = "POST"
 url = "http://localhost:3000/api/ptt/on"
+release_url = "http://localhost:3000/api/ptt/off"
 
 [[button]]
-id = 26
-label = "PTT OFF"
-action = "webhook"
-method = "POST"
-url = "http://localhost:3000/api/ptt/off"
-
-[[button]]
-id = 27
+id = 32
 label = "Clear\nSpotlight"
 action = "webhook"
 method = "DELETE"
@@ -97,17 +64,16 @@ url = "http://localhost:3000/api/spotlight"
 
 # --- Webhook polling: drive button active states from ttrpg-ai ---
 # Polls GET /api/spotlight every 2 seconds and maps JSON fields to button LEDs
+#
+# Available paths:
+#   slots.<N>.spotlit          - by slot number (alphabetical order)
+#   characters.<Name>.spotlit  - by character name (matches registered casing)
+#   players.<Name>.spotlit     - by player name (true when ALL their characters are spotlit)
 [[webhook_poll]]
 url = "http://localhost:3000/api/spotlight"
 interval_secs = 2
 
 [webhook_poll.buttons]
 # button_id = "json.path.to.boolean"
-1 = "slots.1.spotlit"
-2 = "slots.2.spotlit"
-3 = "slots.3.spotlit"
-4 = "slots.4.spotlit"
-5 = "slots.5.spotlit"
-6 = "slots.6.spotlit"
-7 = "slots.7.spotlit"
-8 = "slots.8.spotlit"
+1 = "characters.CharacterName.spotlit"
+19 = "players.PlayerName.spotlit"

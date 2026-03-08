@@ -132,8 +132,15 @@ pub struct ButtonMapping {
     pub active_bg: Option<[u8; 3]>,
     /// Icon file when active.
     pub active_icon: Option<String>,
+    /// Override auto-scaled font size (pixel multiplier, e.g. 3 = 15x21 glyphs). Default: 2.
+    #[serde(default = "default_font_scale")]
+    pub font_scale: Option<u32>,
     #[serde(flatten)]
     pub action: Action,
+}
+
+fn default_font_scale() -> Option<u32> {
+    Some(2)
 }
 
 fn default_page() -> u16 {
@@ -146,11 +153,15 @@ impl Config {
         self.button.iter().map(|b| b.page).max().unwrap_or(1)
     }
 
-    /// Get button mappings for a specific page (LCD buttons only, ids 1-9).
+    /// Get button mappings for a specific page (LCD buttons only).
     pub fn buttons_on_page(&self, page: u16) -> Vec<&ButtonMapping> {
+        let max_lcd = match self.device.device_type {
+            DeviceType::MxCreative => 9,
+            DeviceType::StreamdeckXl => 32,
+        };
         self.button
             .iter()
-            .filter(|b| b.page == page && b.id >= 1 && b.id <= 9)
+            .filter(|b| b.page == page && b.id >= 1 && b.id <= max_lcd)
             .collect()
     }
 
@@ -220,6 +231,8 @@ pub enum Action {
         body: Option<String>,
         #[serde(default)]
         headers: HashMap<String, String>,
+        /// Optional URL to call on button release (e.g. PTT off).
+        release_url: Option<String>,
     },
     Media {
         key: String,
