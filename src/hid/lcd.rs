@@ -122,54 +122,76 @@ pub fn solid_color_image(r: u8, g: u8, b: u8) -> RgbImage {
 }
 
 /// Create a text label image at a custom size (for Stream Deck compatibility).
-pub fn label_image_sized(text: &str, fg: [u8; 3], bg: [u8; 3], width: u32, height: u32) -> RgbImage {
-    label_image_impl(text, fg, bg, width, height)
+pub fn label_image_sized(text: &str, fg: [u8; 3], bg: [u8; 3], width: u32, height: u32, font_scale: Option<u32>) -> RgbImage {
+    label_image_impl(text, fg, bg, width, height, font_scale)
 }
 
 /// Create a text label image for a button (scaled bitmap font).
 /// Uses a basic built-in 5x7 bitmap font scaled up to fill the 118x118 LCD.
 pub fn label_image(text: &str, fg: [u8; 3], bg: [u8; 3]) -> RgbImage {
-    label_image_impl(text, fg, bg, BUTTON_PX as u32, BUTTON_PX as u32)
+    label_image_impl(text, fg, bg, BUTTON_PX as u32, BUTTON_PX as u32, None)
 }
 
-fn label_image_impl(text: &str, fg: [u8; 3], bg: [u8; 3], width: u32, height: u32) -> RgbImage {
+fn label_image_impl(text: &str, fg: [u8; 3], bg: [u8; 3], width: u32, height: u32, font_scale: Option<u32>) -> RgbImage {
     let mut img = RgbImage::from_fn(width, height, |_, _| image::Rgb(bg));
 
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.is_empty() || (lines.len() == 1 && lines[0].is_empty()) {
         return img;
     }
 
     let glyph_w = 5u32;
     let glyph_h = 7u32;
     let spacing = 1u32;
-    let text_glyphs_w = chars.len() as u32 * (glyph_w + spacing) - spacing;
+    let line_spacing = 2u32;
+    let num_lines = lines.len() as u32;
+
+    // Find the longest line to determine scale
+    let max_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u32;
+    if max_chars == 0 {
+        return img;
+    }
+    let max_glyphs_w = max_chars * (glyph_w + spacing) - spacing;
 
     let margin_w = width / 10;
     let margin_h = height / 10;
     let available_w = width - 2 * margin_w;
     let available_h = height - 2 * margin_h;
-    let scale_x = available_w / text_glyphs_w;
-    let scale_y = available_h / glyph_h;
-    let scale = scale_x.min(scale_y).max(1);
+    let scale = if let Some(fs) = font_scale {
+        fs.max(1)
+    } else {
+        let scale_x = available_w / max_glyphs_w;
+        let total_glyph_h = num_lines * glyph_h + (num_lines - 1) * line_spacing;
+        let scale_y = available_h / total_glyph_h;
+        scale_x.min(scale_y).max(1)
+    };
 
     let char_w = (glyph_w + spacing) * scale;
-    let total_w = chars.len() as u32 * char_w - spacing * scale;
-    let total_h = glyph_h * scale;
-    let start_x = width.saturating_sub(total_w) / 2;
-    let start_y = height.saturating_sub(total_h) / 2;
+    let row_h = glyph_h * scale + line_spacing * scale;
+    let total_h = num_lines * glyph_h * scale + (num_lines - 1) * line_spacing * scale;
+    let block_start_y = height.saturating_sub(total_h) / 2;
 
-    for (ci, &ch) in chars.iter().enumerate() {
-        let glyph = get_glyph(ch);
-        for (row, &bits) in glyph.iter().enumerate() {
-            for col in 0..glyph_w {
-                if bits & (1 << (4 - col)) != 0 {
-                    for dy in 0..scale {
-                        for dx in 0..scale {
-                            let px = start_x + ci as u32 * char_w + col * scale + dx;
-                            let py = start_y + row as u32 * scale + dy;
-                            if px < width && py < height {
-                                img.put_pixel(px, py, image::Rgb(fg));
+    for (li, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            continue;
+        }
+        let line_w = chars.len() as u32 * char_w - spacing * scale;
+        let start_x = width.saturating_sub(line_w) / 2;
+        let start_y = block_start_y + li as u32 * row_h;
+
+        for (ci, &ch) in chars.iter().enumerate() {
+            let glyph = get_glyph(ch);
+            for (row, &bits) in glyph.iter().enumerate() {
+                for col in 0..glyph_w {
+                    if bits & (1 << (4 - col)) != 0 {
+                        for dy in 0..scale {
+                            for dx in 0..scale {
+                                let px = start_x + ci as u32 * char_w + col * scale + dx;
+                                let py = start_y + row as u32 * scale + dy;
+                                if px < width && py < height {
+                                    img.put_pixel(px, py, image::Rgb(fg));
+                                }
                             }
                         }
                     }

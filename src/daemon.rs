@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
+use crate::actions::hotkey;
 use crate::actions::media_keys;
 use crate::actions::obs::{ObsClient, ObsState};
 use crate::actions::webhook::WebhookClient;
@@ -202,6 +203,7 @@ fn render_button(mapping: &ButtonMapping, lcd: &LcdWriter, active: bool) {
             Action::Obs { command, .. } => shorten_obs_command(command),
             Action::Media { key } => key.replace('_', " "),
             Action::Webhook { method, .. } => method.clone(),
+            Action::Hotkey { keys, .. } => keys.join("+"),
         };
         lcd.write_button_label(mapping.id, &auto_label, fg, bg)
     };
@@ -339,7 +341,24 @@ async fn run_event_loop(
                         if dry_run {
                             tracing::info!(button = %btn, "Dry run: skipping action dispatch");
                         } else if let Some(mapping) = mapping {
-                            dispatch_mapping(mapping, obs_client, webhook_client).await;
+                            // Optimistic UI: toggle active state before webhook
+                            let old_active = button_active.get(&config_id).copied().unwrap_or(false);
+                            let optimistic = !old_active;
+                            if let DeviceHandle::StreamDeck(deck) = device_handle {
+                                button_active.insert(config_id, optimistic);
+                                render_streamdeck_button_state(mapping, deck, optimistic).await;
+                            }
+
+                            let success = dispatch_mapping(mapping, obs_client, webhook_client).await;
+
+                            // Rollback on failure
+                            if !success {
+                                if let DeviceHandle::StreamDeck(deck) = device_handle {
+                                    button_active.insert(config_id, old_active);
+                                    render_streamdeck_button_state(mapping, deck, old_active).await;
+                                }
+                            }
+
                             if has_obs_buttons {
                                 if let DeviceHandle::MxCreative(Some(lcd)) = device_handle {
                                     update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
@@ -350,7 +369,35 @@ async fn run_event_loop(
                         }
                     }
                     Some(ButtonEvent::Up(btn)) => {
+                        let config_id = btn.to_config_id();
                         tracing::debug!(button = %btn, "Button released");
+                        if !dry_run {
+                            if let Some(mapping) = config.find_button(*current_page, config_id) {
+                                match &mapping.action {
+                                    Action::Webhook { release_url: Some(url), method, headers, .. } => {
+                                        tracing::info!(button = %btn, config_id, "Dispatching release webhook");
+                                        if let DeviceHandle::StreamDeck(deck) = device_handle {
+                                            button_active.insert(config_id, false);
+                                            render_streamdeck_button_state(mapping, deck, false).await;
+                                        }
+                                        if let Err(e) = webhook_client.send(method, url, None, headers).await {
+                                            tracing::warn!(url, error = %e, "Release webhook failed");
+                                        }
+                                    }
+                                    Action::Hotkey { keys, hold: true } => {
+                                        tracing::info!(button = %btn, config_id, ?keys, "Releasing hotkey");
+                                        if let DeviceHandle::StreamDeck(deck) = device_handle {
+                                            button_active.insert(config_id, false);
+                                            render_streamdeck_button_state(mapping, deck, false).await;
+                                        }
+                                        if let Err(e) = hotkey::release_hotkey(keys) {
+                                            tracing::warn!(?keys, error = %e, "Hotkey release failed");
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                     None => {
                         if shutdown.load(Ordering::Relaxed) {
@@ -469,29 +516,44 @@ fn render_page_buttons(config: &Config, lcd: &LcdWriter, page: u16, active_state
     }
 }
 
-/// Dispatch an action from a specific ButtonMapping.
+/// Dispatch an action from a specific ButtonMapping. Returns true on success.
 async fn dispatch_mapping(
     mapping: &ButtonMapping,
     obs_client: &mut ObsClient,
     webhook_client: &WebhookClient,
-) {
+) -> bool {
     match &mapping.action {
         Action::Obs { command, params } => {
             if let Err(e) = obs_client.execute(command, params).await {
                 tracing::warn!(command, error = %e, "OBS action failed");
+                return false;
             }
         }
-        Action::Webhook { method, url, body, headers } => {
+        Action::Webhook { method, url, body, headers, .. } => {
             if let Err(e) = webhook_client.send(method, url, body.as_deref(), headers).await {
                 tracing::warn!(url, error = %e, "Webhook action failed");
+                return false;
             }
         }
         Action::Media { key } => {
             if let Err(e) = media_keys::send_media_key(key) {
                 tracing::warn!(key, error = %e, "Media key action failed");
+                return false;
+            }
+        }
+        Action::Hotkey { keys, hold } => {
+            let result = if *hold {
+                hotkey::press_hotkey(keys)
+            } else {
+                hotkey::send_hotkey(keys)
+            };
+            if let Err(e) = result {
+                tracing::warn!(?keys, error = %e, "Hotkey action failed");
+                return false;
             }
         }
     }
+    true
 }
 
 /// Poll OBS state and update LCD buttons whose active state has changed.
@@ -585,14 +647,15 @@ async fn render_streamdeck_button_state(
     let result = if let Some(icon_path) = icon {
         streamdeck::write_button_file(deck, mapping.id, std::path::Path::new(icon_path)).await
     } else if let Some(label_text) = label {
-        streamdeck::write_button_label(deck, mapping.id, label_text, fg, bg).await
+        streamdeck::write_button_label(deck, mapping.id, label_text, fg, bg, mapping.font_scale).await
     } else {
         let auto_label = match &mapping.action {
             Action::Obs { command, .. } => shorten_obs_command(command),
             Action::Media { key } => key.replace('_', " "),
             Action::Webhook { method, .. } => method.clone(),
+            Action::Hotkey { keys, .. } => keys.join("+"),
         };
-        streamdeck::write_button_label(deck, mapping.id, &auto_label, fg, bg).await
+        streamdeck::write_button_label(deck, mapping.id, &auto_label, fg, bg, mapping.font_scale).await
     };
 
     if let Err(e) = result {

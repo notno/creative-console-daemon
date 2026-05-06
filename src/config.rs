@@ -206,6 +206,11 @@ impl Config {
                     anyhow::bail!("Webhook URL must start with http:// or https://: {url}");
                 }
             }
+            if let Action::Hotkey { keys, .. } = &mapping.action {
+                if keys.is_empty() {
+                    anyhow::bail!("Hotkey button {} must list at least one key", mapping.id);
+                }
+            }
         }
         for poll in &self.webhook_poll {
             if !poll.url.starts_with("http://") && !poll.url.starts_with("https://") {
@@ -236,6 +241,15 @@ pub enum Action {
     },
     Media {
         key: String,
+    },
+    Hotkey {
+        /// List of key names pressed together (e.g. ["ctrl", "win"]).
+        /// Pressed in order, released in reverse.
+        keys: Vec<String>,
+        /// If true, hold keys down for the duration of the button press
+        /// (push-to-talk style). If false (default), tap and release immediately.
+        #[serde(default)]
+        hold: bool,
     },
 }
 

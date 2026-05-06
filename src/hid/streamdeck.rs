@@ -121,12 +121,13 @@ pub async fn write_button_label(
     text: &str,
     fg: [u8; 3],
     bg: [u8; 3],
+    font_scale: Option<u32>,
 ) -> Result<()> {
     let key = config_id.checked_sub(1)
         .context("Button ID must be >= 1")?;
     let kind = deck.kind();
     let (w, h) = kind.key_image_format().size;
-    let img = lcd::label_image_sized(text, fg, bg, w as u32, h as u32);
+    let img = lcd::label_image_sized(text, fg, bg, w as u32, h as u32, font_scale);
     deck.set_button_image(key, DynamicImage::ImageRgb8(img)).await
         .map_err(|e| anyhow::anyhow!("Failed to set Stream Deck button image: {e}"))?;
     deck.flush().await

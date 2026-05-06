@@ -1,0 +1,127 @@
+# One-button push-to-talk: holds Ctrl+Win while button 1 is pressed.
+# Run: cargo run --release -- --config config.ctrl-win.toml
+#
+# To target the Stream Deck XL instead, set device_type = "streamdeck_xl"
+# (and optionally serial = "..." to disambiguate multiple Stream Decks).
+
+[device]
+device_type = "mx_creative"
+
+[[button]]
+id = 1
+label = "Ctrl\nWin"
+action = "hotkey"
+keys = ["ctrl", "rwin"]
+hold = true
+fg = [0, 0, 0]
+bg = [255, 255, 255]
+
+[[button]]
+id = 2
+label = "Win\nV"
+action = "hotkey"
+keys = ["win", "v"]
+fg = [255, 255, 255]
+bg = [0, 90, 180]
+
+[[button]]
+id = 3
+label = "Ctrl\nShift\nV"
+action = "hotkey"
+keys = ["ctrl", "shift", "v"]
+fg = [255, 255, 255]
+bg = [120, 0, 180]
+
+[[button]]
+id = 4
+label = "Esc"
+action = "hotkey"
+keys = ["esc"]
+fg = [255, 255, 255]
+bg = [120, 30, 30]
+
+[[button]]
+id = 5
+label = "Up"
+action = "hotkey"
+keys = ["up"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
+
+[[button]]
+id = 6
+label = "Enter"
+action = "hotkey"
+keys = ["enter"]
+fg = [255, 255, 255]
+bg = [30, 100, 30]
+
+[[button]]
+id = 7
+label = "Left"
+action = "hotkey"
+keys = ["left"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
+
+[[button]]
+id = 8
+label = "Down"
+action = "hotkey"
+keys = ["down"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
+
+[[button]]
+id = 9
+label = "Right"
+action = "hotkey"
+keys = ["right"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
+
+# --- Page 2 ---
+[[button]]
+id = 1
+page = 2
+label = "Win\nShift\nS"
+action = "hotkey"
+keys = ["win", "shift", "s"]
+fg = [0, 0, 0]
+bg = [255, 200, 80]
+
+[[button]]
+id = 4
+page = 2
+label = "Undo"
+action = "hotkey"
+keys = ["ctrl", "z"]
+fg = [255, 255, 255]
+bg = [80, 80, 120]
+
+[[button]]
+id = 7
+page = 2
+label = "Cut"
+action = "hotkey"
+keys = ["ctrl", "x"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
+
+[[button]]
+id = 8
+page = 2
+label = "Copy"
+action = "hotkey"
+keys = ["ctrl", "c"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
+
+[[button]]
+id = 9
+page = 2
+label = "Paste"
+action = "hotkey"
+keys = ["ctrl", "v"]
+fg = [255, 255, 255]
+bg = [40, 40, 40]
