@@ -1,17 +1,22 @@
 # Creative Console Daemon - Install Scheduled Task
-# Registers a Task Scheduler task that runs restart.ps1 hidden at user logon.
-# Usage: .\install-task.ps1 [-TaskName <name>] [-Config <path>]
+# Registers a Task Scheduler task that runs the supervisor hidden at user logon.
+# Default supervisor is tray.ps1 (system tray icon + watchdog).
+# Pass -Headless to use restart.ps1 instead (no tray, console-style).
+#
+# Usage: .\install-task.ps1 [-TaskName <name>] [-Config <path>] [-Headless]
 
 param(
     [string]$TaskName = "CreativeConsoleDaemon",
-    [string]$Config = (Join-Path $PSScriptRoot "config.toml")
+    [string]$Config = (Join-Path $PSScriptRoot "config.toml"),
+    [switch]$Headless
 )
 
 $ErrorActionPreference = "Stop"
 
-$restartScript = Join-Path $PSScriptRoot "restart.ps1"
-if (-not (Test-Path $restartScript)) {
-    Write-Error "restart.ps1 not found at $restartScript"
+$scriptName = if ($Headless) { "restart.ps1" } else { "tray.ps1" }
+$supervisorScript = Join-Path $PSScriptRoot $scriptName
+if (-not (Test-Path $supervisorScript)) {
+    Write-Error "$scriptName not found at $supervisorScript"
     exit 1
 }
 
@@ -19,7 +24,7 @@ if (-not (Test-Path $Config)) {
     Write-Warning "Config not found at $Config (task will still install, but daemon will fail until config exists)."
 }
 
-$argument = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$restartScript`" -Config `"$Config`""
+$argument = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`" -Config `"$Config`""
 
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `

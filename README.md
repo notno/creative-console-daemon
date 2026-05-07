@@ -196,13 +196,18 @@ restart.bat
 
 ### Run at System Startup
 
-Register a Windows Scheduled Task that runs the supervisor (`restart.ps1`) hidden at user logon. This is the recommended option — OBS WebSocket and Windows media keys both require a user session, so a true boot-time service offers no benefit.
+Register a Windows Scheduled Task that runs a supervisor hidden at user logon. This is the recommended option — OBS WebSocket and Windows media keys both require a user session, so a true boot-time service offers no benefit.
+
+By default the installer wires up `tray.ps1`, which shows a system tray icon with a right-click menu (Restart daemon, Open log, Edit config, Quit) and double-click to restart. Pass `-Headless` to use `restart.ps1` instead.
 
 ```powershell
-# Install (registers task "CreativeConsoleDaemon", triggers at logon for current user)
+# Install with tray icon (default)
 .\install-task.ps1
 
-# Optional: specify a different task name or config path
+# Install headless (no tray, just supervisor)
+.\install-task.ps1 -Headless
+
+# Optional: custom task name or config path
 .\install-task.ps1 -TaskName MyDaemon -Config C:\path\to\config.toml
 
 # Test immediately without logging out
@@ -215,13 +220,9 @@ Get-ScheduledTask -TaskName CreativeConsoleDaemon | Get-ScheduledTaskInfo
 .\uninstall-task.ps1
 ```
 
-The task runs as the current user with `Limited` (non-elevated) privileges, hidden window, no time limit, and will restart up to 3 times on failure. The wrapped `restart.ps1` separately handles exit-code-2 restarts on device disconnect.
+The task runs as the current user with `Limited` (non-elevated) privileges, hidden window, no time limit, and will restart up to 3 times on failure. Both supervisors handle exit-code-2 restarts on device disconnect; `tray.ps1` additionally redirects daemon stdout/stderr to `daemon.log` / `daemon.err.log`.
 
-To capture daemon output for debugging, redirect inside `restart.ps1`:
-
-```powershell
-& $exe --config $Config *> (Join-Path $PSScriptRoot "daemon.log")
-```
+You can also run `tray.ps1` manually in a terminal for foreground use.
 
 ### Exit Codes
 
