@@ -1,6 +1,10 @@
 # Creative Console Daemon - Supervisor Script
 # Restarts the daemon on exit code 2 (device disconnect).
-# Usage: .\restart.ps1
+# Usage: .\restart.ps1 [-Config <path>]
+
+param(
+    [string]$Config = (Join-Path $PSScriptRoot "config.toml")
+)
 
 $exe = Join-Path $PSScriptRoot "target\release\creative-console-daemon.exe"
 if (-not (Test-Path $exe)) {
@@ -13,7 +17,7 @@ if (-not (Test-Path $exe)) {
 
 while ($true) {
     Write-Host "[supervisor] Starting daemon..."
-    & $exe --config (Join-Path $PSScriptRoot "config.toml")
+    & $exe --config $Config
     $code = $LASTEXITCODE
 
     if ($code -ne 2) {

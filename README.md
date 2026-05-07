@@ -194,6 +194,35 @@ Or via batch file:
 restart.bat
 ```
 
+### Run at System Startup
+
+Register a Windows Scheduled Task that runs the supervisor (`restart.ps1`) hidden at user logon. This is the recommended option — OBS WebSocket and Windows media keys both require a user session, so a true boot-time service offers no benefit.
+
+```powershell
+# Install (registers task "CreativeConsoleDaemon", triggers at logon for current user)
+.\install-task.ps1
+
+# Optional: specify a different task name or config path
+.\install-task.ps1 -TaskName MyDaemon -Config C:\path\to\config.toml
+
+# Test immediately without logging out
+Start-ScheduledTask -TaskName CreativeConsoleDaemon
+
+# Check status
+Get-ScheduledTask -TaskName CreativeConsoleDaemon | Get-ScheduledTaskInfo
+
+# Remove
+.\uninstall-task.ps1
+```
+
+The task runs as the current user with `Limited` (non-elevated) privileges, hidden window, no time limit, and will restart up to 3 times on failure. The wrapped `restart.ps1` separately handles exit-code-2 restarts on device disconnect.
+
+To capture daemon output for debugging, redirect inside `restart.ps1`:
+
+```powershell
+& $exe --config $Config *> (Join-Path $PSScriptRoot "daemon.log")
+```
+
 ### Exit Codes
 
 | Code | Meaning |
