@@ -147,12 +147,36 @@ The poller fetches the URL, walks each dot-separated JSON path, and treats the r
 | Action | Fields | Description |
 |--------|--------|-------------|
 | `obs` | `command`, `params` | Send command to OBS via WebSocket |
-| `webhook` | `method`, `url`, `body`, `headers` | Send HTTP request |
+| `webhook` | `method`, `url`, `body`, `headers`, `release_url` | Send HTTP request (optional second request on release) |
 | `media` | `key` | Simulate media key press |
+| `hotkey` | `keys`, `hold` | Send a key combo via SendInput |
+| `shell` | `cmd`, `args`, `output`, `trim` | Run a command, optionally capture stdout |
 
 **OBS commands:** `SetCurrentProgramScene`, `StartRecord`, `StopRecord`, `ToggleRecord`, `ToggleInputMute`
 
 **Media keys:** `play_pause`, `volume_up`, `volume_down`, `mute`, `next_track`, `prev_track`
+
+**Hotkey:** `keys` is a list pressed together and released in reverse (e.g. `["ctrl", "win"]`). Set `hold = true` for push-to-talk (keys stay down while the button is held); the default taps and releases immediately.
+
+**Shell:** `output` is `none`, `clipboard`, or `paste` (default `paste` — copies stdout then sends Ctrl+V). `trim = true` (default) strips surrounding whitespace from stdout first.
+
+```toml
+[[button]]
+id = 4
+label = "Ctrl+Win"
+[button.action]
+type = "hotkey"
+keys = ["ctrl", "win"]
+
+[[button]]
+id = 5
+label = "Paste Shot"
+[button.action]
+type = "shell"
+cmd = "powershell"
+args = ["-NoProfile", "-Command", "Get-Date -Format o"]
+output = "paste"
+```
 
 ### Button ID Reference
 
@@ -232,6 +256,10 @@ If you fully **Quit** the tray app, relaunch it with `.\launch.ps1` (or re-run t
 ### Editing buttons
 
 Open the editor from the tray icon (**Open editor**, or double-click the icon). It's a GUI for button actions, labels, colors, and pages. When more than one config is open, a dropdown at the top switches which one you're editing (each keeps its own unsaved edits). Saving writes that config; its daemon hot-reloads and re-renders the device — no restart needed. Saving regenerates the file in a canonical form, so hand-written comments are not preserved.
+
+**Copy / paste buttons.** Right-click a button for **Copy / Cut / Paste / Delete**, or use **Ctrl+C / Ctrl+X / Ctrl+V** and **Delete** on the selected cell (these defer to the focused text field while you're typing in one). The clipboard is shared across tabs, so you can copy a button from one config or device and paste it into another — the pasted button takes the target cell's id/page and replaces whatever is there. **Ctrl+S** saves the active tab.
+
+**Undo / redo.** Structural edits (create, delete, cut, paste) are undoable per config — **Ctrl+Z** to undo, **Ctrl+Y** or **Ctrl+Shift+Z** to redo, or use the Undo/Redo buttons in the top bar (history depth 50). Field edits (label text, colors, params) aren't on this stack, but text fields self-undo with Ctrl+Z while focused.
 
 `editor.exe` has two modes: launched with config paths (or no args) it runs as the **resident tray + supervisor** (no window), one daemon per config; launched with `--edit` it opens the **editor window** with a tab per config. The tray spawns the editor window for you, so you normally never pass `--edit` yourself.
 

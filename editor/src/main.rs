@@ -256,6 +256,9 @@ fn read_log_tail(path: &Path, max: usize) -> Vec<String> {
 
 /// One open config the editor can edit. Each keeps its own edits/selection so
 /// switching tabs doesn't lose unsaved work.
+/// Cap on the per-tab undo history so a long session can't grow it unbounded.
+const UNDO_LIMIT: usize = 50;
+
 struct ConfigTab {
     path: PathBuf,
     log_path: PathBuf,
@@ -264,6 +267,12 @@ struct ConfigTab {
     selected_id: Option<u8>,
     dirty: bool,
     message: Option<(bool, String)>,
+    /// Snapshots taken before each structural edit (create/delete/cut/paste),
+    /// newest last. `Ctrl+Z` / Undo pops the latest.
+    undo: Vec<EditModel>,
+    /// States undone but not yet superseded, newest last. `Ctrl+Y` /
+    /// `Ctrl+Shift+Z` / Redo replays them; a fresh structural edit clears it.
+    redo: Vec<EditModel>,
 }
 
 impl ConfigTab {
@@ -278,6 +287,8 @@ impl ConfigTab {
             selected_id: None,
             dirty: false,
             message: err.map(|e| (true, e)),
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -306,10 +317,70 @@ impl ConfigTab {
         self.current_page = 1;
         self.selected_id = None;
         self.dirty = false;
+        self.undo.clear();
+        self.redo.clear();
         self.message = match err {
             Some(e) => Some((true, e)),
             None => Some((false, "Reloaded from disk.".into())),
         };
+    }
+
+    /// Record the current model so the next structural edit can be undone. A
+    /// fresh edit invalidates the redo branch.
+    fn snapshot(&mut self) {
+        self.undo.push(self.model.clone());
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Clamp the selection if its cell no longer exists after a history jump.
+    fn clamp_selection(&mut self) {
+        if let Some(id) = self.selected_id {
+            if self.button_index(self.current_page, id).is_none() {
+                self.selected_id = None;
+            }
+        }
+    }
+
+    /// Restore the most recent snapshot, if any (and make it redoable).
+    fn undo(&mut self) {
+        match self.undo.pop() {
+            Some(prev) => {
+                self.redo.push(std::mem::replace(&mut self.model, prev));
+                self.dirty = true;
+                self.clamp_selection();
+                self.message = Some((false, "Undid last change.".into()));
+            }
+            None => self.message = Some((false, "Nothing to undo.".into())),
+        }
+    }
+
+    /// Replay the most recently undone state, if any.
+    fn redo(&mut self) {
+        match self.redo.pop() {
+            Some(next) => {
+                self.undo.push(std::mem::replace(&mut self.model, next));
+                self.dirty = true;
+                self.clamp_selection();
+                self.message = Some((false, "Redid last change.".into()));
+            }
+            None => self.message = Some((false, "Nothing to redo.".into())),
+        }
+    }
+
+    /// Delete the button on cell `id` of the current page (undoable).
+    fn remove_button(&mut self, id: u8) {
+        if let Some(i) = self.button_index(self.current_page, id) {
+            self.snapshot();
+            self.model.buttons.remove(i);
+            if self.selected_id == Some(id) {
+                self.selected_id = None;
+            }
+            self.dirty = true;
+            self.message = Some((false, format!("Deleted button {id}.")));
+        }
     }
 
     /// Copy the selected button into the shared clipboard.
@@ -326,6 +397,7 @@ impl ConfigTab {
     fn cut_selected(&mut self, clip: &mut Option<ButtonEdit>) {
         if let Some(id) = self.selected_id {
             if let Some(i) = self.button_index(self.current_page, id) {
+                self.snapshot();
                 *clip = Some(self.model.buttons[i].clone());
                 self.model.buttons.remove(i);
                 self.selected_id = None;
@@ -346,6 +418,7 @@ impl ConfigTab {
     /// rewritten to the target, so it works across pages and devices. Replaces
     /// any existing button there.
     fn paste_onto(&mut self, src: &ButtonEdit, id: u8) {
+        self.snapshot();
         let mut b = src.clone();
         b.id = id;
         b.page = self.current_page;
@@ -384,17 +457,25 @@ impl eframe::App for EditorApp {
         // Ctrl+S saves the active tab — works even while a text field has focus.
         let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
 
-        // Ctrl+C / Ctrl+X / Ctrl+V on the selected button — but not while a text
-        // field has focus, so they keep their normal in-field meaning there.
-        let (copy, cut, paste) = if ctx.wants_keyboard_input() {
-            (false, false, false)
+        // Ctrl+C/X/V, undo/redo, and Delete act on the selected button — but not
+        // while a text field has focus, so they keep their in-field meaning there
+        // (Ctrl+Z then undoes typing via egui's own per-field history).
+        let (copy, cut, paste, undo, redo, delete) = if ctx.wants_keyboard_input() {
+            (false, false, false, false, false, false)
         } else {
             ctx.input_mut(|i| {
-                (
-                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
-                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::X),
-                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::V),
-                )
+                let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+                let cut = i.consume_key(egui::Modifiers::COMMAND, egui::Key::X);
+                let paste = i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+                // Redo (Ctrl+Shift+Z / Ctrl+Y) must be checked before undo:
+                // consume_key ignores extra Shift, so plain Ctrl+Z would
+                // otherwise also swallow Ctrl+Shift+Z.
+                let redo = i
+                    .consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
+                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
+                let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                let delete = i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+                (copy, cut, paste, undo, redo, delete)
             })
         };
         if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -409,6 +490,17 @@ impl eframe::App for EditorApp {
             }
             if paste {
                 tab.paste_selected(&self.clipboard);
+            }
+            if undo {
+                tab.undo();
+            }
+            if redo {
+                tab.redo();
+            }
+            if delete {
+                if let Some(id) = tab.selected_id {
+                    tab.remove_button(id);
+                }
             }
         }
 
@@ -454,6 +546,14 @@ impl EditorApp {
                 let save = egui::Button::new(if tab.dirty { "Save *" } else { "Save" });
                 if ui.add_enabled(tab.dirty, save).on_hover_text("Ctrl+S").clicked() {
                     tab.save();
+                }
+                let undo = egui::Button::new("Undo");
+                if ui.add_enabled(!tab.undo.is_empty(), undo).on_hover_text("Ctrl+Z").clicked() {
+                    tab.undo();
+                }
+                let redo = egui::Button::new("Redo");
+                if ui.add_enabled(!tab.redo.is_empty(), redo).on_hover_text("Ctrl+Y").clicked() {
+                    tab.redo();
                 }
                 if ui.button("Reload from disk").clicked() {
                     tab.reload();
@@ -541,6 +641,7 @@ impl ConfigTab {
         let mut to_copy: Option<u8> = None;
         let mut to_cut: Option<u8> = None;
         let mut to_paste: Option<u8> = None;
+        let mut to_delete: Option<u8> = None;
 
         let mut id: u8 = 1;
         while id <= max_id {
@@ -583,6 +684,11 @@ impl ConfigTab {
                                     to_paste = Some(id);
                                     ui.close();
                                 }
+                                ui.separator();
+                                if ui.button("Delete").clicked() {
+                                    to_delete = Some(id);
+                                    ui.close();
+                                }
                             });
                         }
                         None => {
@@ -610,6 +716,7 @@ impl ConfigTab {
         }
 
         if let Some(id) = to_create {
+            self.snapshot();
             self.model.buttons.push(ButtonEdit::new(id, self.current_page));
             self.selected_id = Some(id);
             self.dirty = true;
@@ -629,6 +736,9 @@ impl ConfigTab {
             if let Some(src) = clip.as_ref() {
                 self.paste_onto(src, id);
             }
+        }
+        if let Some(id) = to_delete {
+            self.remove_button(id);
         }
     }
 
@@ -742,9 +852,7 @@ impl ConfigTab {
             }
 
             if remove {
-                self.model.buttons.remove(idx);
-                self.selected_id = None;
-                self.dirty = true;
+                self.remove_button(id);
             } else if cut {
                 self.cut_selected(clip);
             } else {
