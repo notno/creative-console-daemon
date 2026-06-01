@@ -311,17 +311,66 @@ impl ConfigTab {
             None => Some((false, "Reloaded from disk.".into())),
         };
     }
+
+    /// Copy the selected button into the shared clipboard.
+    fn copy_selected(&mut self, clip: &mut Option<ButtonEdit>) {
+        if let Some(id) = self.selected_id {
+            if let Some(i) = self.button_index(self.current_page, id) {
+                *clip = Some(self.model.buttons[i].clone());
+                self.message = Some((false, format!("Copied button {id}.")));
+            }
+        }
+    }
+
+    /// Copy the selected button into the clipboard, then delete it.
+    fn cut_selected(&mut self, clip: &mut Option<ButtonEdit>) {
+        if let Some(id) = self.selected_id {
+            if let Some(i) = self.button_index(self.current_page, id) {
+                *clip = Some(self.model.buttons[i].clone());
+                self.model.buttons.remove(i);
+                self.selected_id = None;
+                self.dirty = true;
+                self.message = Some((false, format!("Cut button {id}.")));
+            }
+        }
+    }
+
+    /// Paste the clipboard onto the currently selected cell, if any.
+    fn paste_selected(&mut self, clip: &Option<ButtonEdit>) {
+        if let (Some(src), Some(id)) = (clip.as_ref(), self.selected_id) {
+            self.paste_onto(src, id);
+        }
+    }
+
+    /// Paste a button onto cell `id` of the current page — its id/page are
+    /// rewritten to the target, so it works across pages and devices. Replaces
+    /// any existing button there.
+    fn paste_onto(&mut self, src: &ButtonEdit, id: u8) {
+        let mut b = src.clone();
+        b.id = id;
+        b.page = self.current_page;
+        match self.button_index(self.current_page, id) {
+            Some(i) => self.model.buttons[i] = b,
+            None => self.model.buttons.push(b),
+        }
+        self.selected_id = Some(id);
+        self.dirty = true;
+        self.message = Some((false, format!("Pasted into button {id}.")));
+    }
 }
 
 struct EditorApp {
     tabs: Vec<ConfigTab>,
     active: usize,
+    /// Shared across tabs so a button copied from one config (or device) can be
+    /// pasted into another. The target cell's id/page is applied on paste.
+    clipboard: Option<ButtonEdit>,
 }
 
 impl EditorApp {
     fn new(configs: Vec<PathBuf>) -> Self {
         let tabs = configs.into_iter().map(ConfigTab::load).collect();
-        Self { tabs, active: 0 }
+        Self { tabs, active: 0, clipboard: None }
     }
 }
 
@@ -332,10 +381,41 @@ impl eframe::App for EditorApp {
 
         self.top_panel(ctx);
 
+        // Ctrl+S saves the active tab — works even while a text field has focus.
+        let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+
+        // Ctrl+C / Ctrl+X / Ctrl+V on the selected button — but not while a text
+        // field has focus, so they keep their normal in-field meaning there.
+        let (copy, cut, paste) = if ctx.wants_keyboard_input() {
+            (false, false, false)
+        } else {
+            ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::X),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::V),
+                )
+            })
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if save && tab.dirty {
+                tab.save();
+            }
+            if copy {
+                tab.copy_selected(&mut self.clipboard);
+            }
+            if cut {
+                tab.cut_selected(&mut self.clipboard);
+            }
+            if paste {
+                tab.paste_selected(&self.clipboard);
+            }
+        }
+
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.log_panel(ctx);
-            tab.left_panel(ctx);
-            tab.button_editor_panel(ctx);
+            tab.left_panel(ctx, &mut self.clipboard);
+            tab.button_editor_panel(ctx, &mut self.clipboard);
         }
     }
 }
@@ -346,6 +426,12 @@ impl EditorApp {
             ui.horizontal(|ui| {
                 ui.heading("Creative Console");
                 ui.separator();
+
+                if let Some(b) = &self.clipboard {
+                    ui.label(RichText::new(format!("📋 {}", grid_label(b))).weak())
+                        .on_hover_text("Clipboard — Ctrl+V or right-click a cell to paste");
+                    ui.separator();
+                }
 
                 // Config selector (one tab per open config).
                 if self.tabs.len() > 1 {
@@ -366,7 +452,7 @@ impl EditorApp {
                     return;
                 };
                 let save = egui::Button::new(if tab.dirty { "Save *" } else { "Save" });
-                if ui.add_enabled(tab.dirty, save).clicked() {
+                if ui.add_enabled(tab.dirty, save).on_hover_text("Ctrl+S").clicked() {
                     tab.save();
                 }
                 if ui.button("Reload from disk").clicked() {
@@ -413,7 +499,7 @@ impl ConfigTab {
             });
     }
 
-    fn left_panel(&mut self, ctx: &egui::Context) {
+    fn left_panel(&mut self, ctx: &egui::Context, clip: &mut Option<ButtonEdit>) {
         egui::SidePanel::left("nav")
             .resizable(true)
             .default_width(360.0)
@@ -433,7 +519,7 @@ impl ConfigTab {
                     }
                 });
                 ui.separator();
-                self.button_grid(ui);
+                self.button_grid(ui, clip);
                 ui.separator();
                 ui.collapsing("Device & OBS settings", |ui| {
                     self.settings_ui(ui);
@@ -441,16 +527,20 @@ impl ConfigTab {
             });
     }
 
-    fn button_grid(&mut self, ui: &mut egui::Ui) {
+    fn button_grid(&mut self, ui: &mut egui::Ui, clip: &mut Option<ButtonEdit>) {
         let cols: u8 = match self.model.device_type {
             DeviceType::MxCreative => 3,
             DeviceType::StreamdeckXl => 8,
         };
         let max_id = self.model.max_lcd_id();
         let cell = egui::vec2(96.0, 64.0);
+        let has_clip = clip.is_some();
 
         let mut to_select: Option<u8> = None;
         let mut to_create: Option<u8> = None;
+        let mut to_copy: Option<u8> = None;
+        let mut to_cut: Option<u8> = None;
+        let mut to_paste: Option<u8> = None;
 
         let mut id: u8 = 1;
         while id <= max_id {
@@ -473,17 +563,45 @@ impl ConfigTab {
                             if selected {
                                 btn = btn.stroke(egui::Stroke::new(2.0, Color32::YELLOW));
                             }
-                            if ui.add(btn).clicked() {
+                            let resp = ui.add(btn);
+                            if resp.clicked() {
                                 to_select = Some(id);
                             }
+                            resp.context_menu(|ui| {
+                                if ui.button("Copy").clicked() {
+                                    to_copy = Some(id);
+                                    ui.close();
+                                }
+                                if ui.button("Cut").clicked() {
+                                    to_cut = Some(id);
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(has_clip, egui::Button::new("Paste (replace)"))
+                                    .clicked()
+                                {
+                                    to_paste = Some(id);
+                                    ui.close();
+                                }
+                            });
                         }
                         None => {
                             let btn = egui::Button::new(RichText::new(format!("＋ {id}")).weak())
                                 .min_size(cell)
                                 .fill(Color32::from_gray(28));
-                            if ui.add(btn).clicked() {
+                            let resp = ui.add(btn);
+                            if resp.clicked() {
                                 to_create = Some(id);
                             }
+                            resp.context_menu(|ui| {
+                                if ui
+                                    .add_enabled(has_clip, egui::Button::new("Paste"))
+                                    .clicked()
+                                {
+                                    to_paste = Some(id);
+                                    ui.close();
+                                }
+                            });
                         }
                     }
                     id += 1;
@@ -498,6 +616,19 @@ impl ConfigTab {
         }
         if let Some(id) = to_select {
             self.selected_id = Some(id);
+        }
+        if let Some(id) = to_copy {
+            self.selected_id = Some(id);
+            self.copy_selected(clip);
+        }
+        if let Some(id) = to_cut {
+            self.selected_id = Some(id);
+            self.cut_selected(clip);
+        }
+        if let Some(id) = to_paste {
+            if let Some(src) = clip.as_ref() {
+                self.paste_onto(src, id);
+            }
         }
     }
 
@@ -565,7 +696,7 @@ impl ConfigTab {
         }
     }
 
-    fn button_editor_panel(&mut self, ctx: &egui::Context) {
+    fn button_editor_panel(&mut self, ctx: &egui::Context, clip: &mut Option<ButtonEdit>) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(id) = self.selected_id else {
                 ui.centered_and_justified(|ui| {
@@ -578,12 +709,25 @@ impl ConfigTab {
                 return;
             };
 
+            let has_clip = clip.is_some();
             let mut dirty = false;
             let mut remove = false;
+            let mut copy = false;
+            let mut cut = false;
+            let mut paste = false;
             {
                 let b = &mut self.model.buttons[idx];
                 ui.horizontal(|ui| {
                     ui.heading(format!("Button {id} (page {})", self.current_page));
+                    if ui.button("Copy").clicked() {
+                        copy = true;
+                    }
+                    if ui.button("Cut").clicked() {
+                        cut = true;
+                    }
+                    if ui.add_enabled(has_clip, egui::Button::new("Paste")).clicked() {
+                        paste = true;
+                    }
                     if ui.button("Remove").clicked() {
                         remove = true;
                     }
@@ -601,8 +745,18 @@ impl ConfigTab {
                 self.model.buttons.remove(idx);
                 self.selected_id = None;
                 self.dirty = true;
-            } else if dirty {
-                self.dirty = true;
+            } else if cut {
+                self.cut_selected(clip);
+            } else {
+                if copy {
+                    self.copy_selected(clip);
+                }
+                if paste {
+                    self.paste_selected(clip);
+                }
+                if dirty {
+                    self.dirty = true;
+                }
             }
         });
     }
