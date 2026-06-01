@@ -1,13 +1,11 @@
-mod actions;
-mod config;
-mod daemon;
-mod hid;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use clap::Parser;
+use creative_console_daemon::{config, daemon, hid};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -37,8 +35,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
+    // Initialize tracing. Disable ANSI color codes when stdout isn't a terminal
+    // (e.g. piped to the editor's log view), where they'd render as garbage.
     tracing_subscriber::fmt()
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )

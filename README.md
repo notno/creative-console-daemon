@@ -198,17 +198,22 @@ restart.bat
 
 Register a Windows Scheduled Task that runs a supervisor hidden at user logon. This is the recommended option — OBS WebSocket and Windows media keys both require a user session, so a true boot-time service offers no benefit.
 
-By default the installer wires up `tray.ps1`, which shows a system tray icon with a right-click menu (Restart daemon, Open log, Edit config, Quit) and double-click to restart. Pass `-Headless` to use `restart.ps1` instead.
+By default the installer wires up `editor.exe`: a windowless tray app that supervises the daemon(s) (auto-restart on device disconnect) and hosts the button/page editor. Right-click the tray icon for **Open editor / Open logs / Start daemons / Stop daemons / Restart daemons / Quit**; double-click to open the editor. Pass `-Headless` to use `restart.ps1` instead (no tray/editor, console supervisor, single config).
+
+**One daemon runs per config.** Pass an MX config and a Stream Deck config and both devices run at once; a device that isn't plugged in just leaves its daemon stopped. The default config set is `config.ctrl-win.toml` + `config.streamdeck.toml`.
 
 ```powershell
-# Install with tray icon (default)
+# Build both binaries first
+cargo build --release --workspace
+
+# Install with tray app + editor (default: MX + Stream Deck configs)
 .\install-task.ps1
 
-# Install headless (no tray, just supervisor)
-.\install-task.ps1 -Headless
+# Just one device
+.\install-task.ps1 -Configs config.ctrl-win.toml
 
-# Optional: custom task name or config path
-.\install-task.ps1 -TaskName MyDaemon -Config C:\path\to\config.toml
+# Install headless (no tray, just supervisor — single config)
+.\install-task.ps1 -Headless -Configs config.ctrl-win.toml
 
 # Test immediately without logging out
 Start-ScheduledTask -TaskName CreativeConsoleDaemon
@@ -220,9 +225,19 @@ Get-ScheduledTask -TaskName CreativeConsoleDaemon | Get-ScheduledTaskInfo
 .\uninstall-task.ps1
 ```
 
-The task runs as the current user with `Limited` (non-elevated) privileges, hidden window, no time limit, and will restart up to 3 times on failure. Both supervisors handle exit-code-2 restarts on device disconnect; `tray.ps1` additionally redirects daemon stdout/stderr to `daemon.log` / `daemon.err.log`.
+The task runs as the current user with `Limited` (non-elevated) privileges, no time limit, and will restart up to 3 times on failure. Both modes handle exit-code-2 restarts on device disconnect. A Win32 Job Object ties the daemon children to the tray process, so they're terminated even if the tray process is force-killed.
 
-You can also run `tray.ps1` manually in a terminal for foreground use.
+If you fully **Quit** the tray app, relaunch it with `.\launch.ps1` (or re-run the task). The **Start daemons** tray item only restarts the daemons, not the whole app.
+
+### Editing buttons
+
+Open the editor from the tray icon (**Open editor**, or double-click the icon). It's a GUI for button actions, labels, colors, and pages. When more than one config is open, a dropdown at the top switches which one you're editing (each keeps its own unsaved edits). Saving writes that config; its daemon hot-reloads and re-renders the device — no restart needed. Saving regenerates the file in a canonical form, so hand-written comments are not preserved.
+
+`editor.exe` has two modes: launched with config paths (or no args) it runs as the **resident tray + supervisor** (no window), one daemon per config; launched with `--edit` it opens the **editor window** with a tab per config. The tray spawns the editor window for you, so you normally never pass `--edit` yourself.
+
+```powershell
+target\release\editor.exe --edit config.ctrl-win.toml config.streamdeck.toml
+```
 
 ### Exit Codes
 

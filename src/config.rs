@@ -180,8 +180,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content =
             std::fs::read_to_string(path).with_context(|| format!("Failed to read config: {}", path.display()))?;
-        let config: Config =
-            toml::from_str(&content).with_context(|| format!("Failed to parse config: {}", path.display()))?;
+        Self::parse(&content)
+    }
+
+    /// Parse and validate a config from a TOML string. Used by the editor to
+    /// validate before overwriting the file on disk.
+    pub fn parse(content: &str) -> Result<Self> {
+        let config: Config = toml::from_str(content).context("Failed to parse config")?;
         config.validate()?;
         Ok(config)
     }
@@ -210,6 +215,13 @@ impl Config {
                 if keys.is_empty() {
                     anyhow::bail!("Hotkey button {} must list at least one key", mapping.id);
                 }
+            }
+            if let Action::Shell { cmd, output, .. } = &mapping.action {
+                if cmd.trim().is_empty() {
+                    anyhow::bail!("Shell button {} must set 'cmd' to a non-empty string", mapping.id);
+                }
+                crate::actions::shell::ShellOutput::from_str(output)
+                    .with_context(|| format!("Shell button {}", mapping.id))?;
             }
         }
         for poll in &self.webhook_poll {
@@ -251,6 +263,27 @@ pub enum Action {
         #[serde(default)]
         hold: bool,
     },
+    Shell {
+        /// Executable to run (e.g. "powershell", "cmd", "C:/Tools/foo.exe").
+        cmd: String,
+        /// Arguments passed to the executable.
+        #[serde(default)]
+        args: Vec<String>,
+        /// What to do with stdout: "none", "clipboard", or "paste" (default: "paste").
+        #[serde(default = "default_shell_output")]
+        output: String,
+        /// Trim leading/trailing whitespace from stdout before clipboard set (default: true).
+        #[serde(default = "default_true")]
+        trim: bool,
+    },
+}
+
+fn default_shell_output() -> String {
+    "paste".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_method() -> String {

@@ -3,7 +3,7 @@
 # Usage: .\restart.ps1 [-Config <path>]
 
 param(
-    [string]$Config = (Join-Path $PSScriptRoot "config.toml")
+    [string]$Config = (Join-Path $PSScriptRoot "config.ctrl-win.toml")
 )
 
 $exe = Join-Path $PSScriptRoot "target\release\creative-console-daemon.exe"

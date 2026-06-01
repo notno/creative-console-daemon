@@ -1,33 +1,58 @@
-# Creative Console Daemon - Install Scheduled Task
-# Registers a Task Scheduler task that runs the supervisor hidden at user logon.
-# Default supervisor is tray.ps1 (system tray icon + watchdog).
-# Pass -Headless to use restart.ps1 instead (no tray, console-style).
+# Creative Console - Install Scheduled Task
+# Registers a Task Scheduler task that starts the app at user logon.
+# Default is editor.exe: a windowless tray supervisor (auto-restart watchdog)
+# with the button/page editor reachable from the tray menu ("Open editor").
 #
-# Usage: .\install-task.ps1 [-TaskName <name>] [-Config <path>] [-Headless]
+# Pass one or more configs — one daemon runs per config, so the MX Creative and
+# the Stream Deck can both run at once. Devices that aren't plugged in just
+# leave their daemon stopped.
+#
+# Pass -Headless to use restart.ps1 instead (no tray/editor, console supervisor;
+# single config only — uses the first one given).
+#
+# Usage: .\install-task.ps1 [-TaskName <name>] [-Configs <path>[,<path>...]] [-Headless]
 
 param(
     [string]$TaskName = "CreativeConsoleDaemon",
-    [string]$Config = (Join-Path $PSScriptRoot "config.toml"),
+    [string[]]$Configs = @(
+        (Join-Path $PSScriptRoot "config.ctrl-win.toml"),
+        (Join-Path $PSScriptRoot "config.streamdeck.toml")
+    ),
     [switch]$Headless
 )
 
 $ErrorActionPreference = "Stop"
 
-$scriptName = if ($Headless) { "restart.ps1" } else { "tray.ps1" }
-$supervisorScript = Join-Path $PSScriptRoot $scriptName
-if (-not (Test-Path $supervisorScript)) {
-    Write-Error "$scriptName not found at $supervisorScript"
-    exit 1
+if ($Headless) {
+    $supervisorScript = Join-Path $PSScriptRoot "restart.ps1"
+    if (-not (Test-Path $supervisorScript)) {
+        Write-Error "restart.ps1 not found at $supervisorScript"
+        exit 1
+    }
+    if ($Configs.Count -gt 1) {
+        Write-Warning "Headless mode supervises a single config; using '$($Configs[0])'."
+    }
+    $execute = "powershell.exe"
+    $argument = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`" -Config `"$($Configs[0])`""
+} else {
+    $exe = Join-Path $PSScriptRoot "target\release\editor.exe"
+    if (-not (Test-Path $exe)) { $exe = Join-Path $PSScriptRoot "target\debug\editor.exe" }
+    if (-not (Test-Path $exe)) {
+        Write-Error "editor.exe not found. Run 'cargo build --release --workspace' first."
+        exit 1
+    }
+    $execute = $exe
+    $argument = ($Configs | ForEach-Object { "`"$_`"" }) -join ' '
 }
 
-if (-not (Test-Path $Config)) {
-    Write-Warning "Config not found at $Config (task will still install, but daemon will fail until config exists)."
+foreach ($c in $Configs) {
+    if (-not (Test-Path $c)) {
+        Write-Warning "Config not found at $c (task will still install, but that daemon will fail until the config exists)."
+    }
 }
-
-$argument = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`" -Config `"$Config`""
 
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
+    -Execute $execute `
     -Argument $argument `
     -WorkingDirectory $PSScriptRoot
 

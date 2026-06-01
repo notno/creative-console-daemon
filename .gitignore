@@ -3,3 +3,4 @@
 config.toml
 config.streamdeck.toml
 config.mx.toml
+*.log

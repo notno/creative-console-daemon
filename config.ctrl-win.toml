@@ -14,7 +14,7 @@ action = "hotkey"
 keys = ["ctrl", "rwin"]
 hold = true
 fg = [0, 0, 0]
-bg = [255, 255, 255]
+bg = [255, 0, 0]
 
 [[button]]
 id = 2
@@ -26,25 +26,32 @@ bg = [0, 90, 180]
 
 [[button]]
 id = 3
-label = "Ctrl\nShift\nV"
+label = "Ctrl\nAlt\nV"
 action = "hotkey"
-keys = ["ctrl", "shift", "v"]
+keys = ["ctrl", "alt", "v"]
 fg = [255, 255, 255]
 bg = [120, 0, 180]
 
 [[button]]
 id = 4
-label = "Esc"
+label = "Win\nShift\nS"
 action = "hotkey"
-keys = ["esc"]
-fg = [255, 255, 255]
-bg = [120, 30, 30]
+keys = ["win", "shift", "s"]
+fg = [0, 0, 0]
+bg = [255, 200, 80]
+# [[button]]
+# id = 4
+# label = "Esc"
+# action = "hotkey"
+# keys = ["esc"]
+# fg = [255, 255, 255]
+# bg = [120, 30, 30]
 
 [[button]]
 id = 5
 label = "Up"
 action = "hotkey"
-keys = ["up"]
+keys = ["ctrl", "alt", "up"]
 fg = [255, 255, 255]
 bg = [40, 40, 40]
 
@@ -60,7 +67,7 @@ bg = [30, 100, 30]
 id = 7
 label = "Left"
 action = "hotkey"
-keys = ["left"]
+keys = ["ctrl", "alt", "left"]
 fg = [255, 255, 255]
 bg = [40, 40, 40]
 
@@ -68,7 +75,7 @@ bg = [40, 40, 40]
 id = 8
 label = "Down"
 action = "hotkey"
-keys = ["down"]
+keys = ["ctrl", "alt", "down"]
 fg = [255, 255, 255]
 bg = [40, 40, 40]
 
@@ -76,7 +83,7 @@ bg = [40, 40, 40]
 id = 9
 label = "Right"
 action = "hotkey"
-keys = ["right"]
+keys = ["ctrl", "alt", "right"]
 fg = [255, 255, 255]
 bg = [40, 40, 40]
 
@@ -89,6 +96,22 @@ action = "hotkey"
 keys = ["win", "shift", "s"]
 fg = [0, 0, 0]
 bg = [255, 200, 80]
+
+# Paste newest screenshot path into the focused app (Ctrl+V).
+[[button]]
+id = 2
+page = 2
+label = "Paste\nLatest\nShot"
+action = "shell"
+cmd = "powershell"
+args = [
+    "-NoProfile",
+    "-Command",
+    "(Get-ChildItem -LiteralPath 'C:\\Users\\nrosq\\Pictures\\Screenshots' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName",
+]
+output = "paste"
+fg = [0, 0, 0]
+bg = [200, 240, 120]
 
 [[button]]
 id = 4

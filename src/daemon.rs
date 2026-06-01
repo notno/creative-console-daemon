@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use crate::actions::hotkey;
 use crate::actions::media_keys;
 use crate::actions::obs::{ObsClient, ObsState};
+use crate::actions::shell::{self, ShellOutput};
 use crate::actions::webhook::WebhookClient;
 use crate::actions::webhook_poll::WebhookPoller;
 use crate::config::{Action, ButtonMapping, Config, DeviceType};
@@ -204,6 +205,7 @@ fn render_button(mapping: &ButtonMapping, lcd: &LcdWriter, active: bool) {
             Action::Media { key } => key.replace('_', " "),
             Action::Webhook { method, .. } => method.clone(),
             Action::Hotkey { keys, .. } => keys.join("+"),
+            Action::Shell { cmd, .. } => cmd.clone(),
         };
         lcd.write_button_label(mapping.id, &auto_label, fg, bg)
     };
@@ -552,6 +554,19 @@ async fn dispatch_mapping(
                 return false;
             }
         }
+        Action::Shell { cmd, args, output, trim } => {
+            let mode = match ShellOutput::from_str(output) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(cmd, error = %e, "Shell action skipped (invalid output mode)");
+                    return false;
+                }
+            };
+            if let Err(e) = shell::run(cmd, args, mode, *trim).await {
+                tracing::warn!(cmd, error = %e, "Shell action failed");
+                return false;
+            }
+        }
     }
     true
 }
@@ -654,6 +669,7 @@ async fn render_streamdeck_button_state(
             Action::Media { key } => key.replace('_', " "),
             Action::Webhook { method, .. } => method.clone(),
             Action::Hotkey { keys, .. } => keys.join("+"),
+            Action::Shell { cmd, .. } => cmd.clone(),
         };
         streamdeck::write_button_label(deck, mapping.id, &auto_label, fg, bg, mapping.font_scale).await
     };
