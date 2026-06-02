@@ -242,6 +242,16 @@ fn is_button_active(mapping: &ButtonMapping, obs_state: &ObsState) -> bool {
     }
 }
 
+/// Whether a button has a distinct "active" appearance worth rendering. If it
+/// doesn't, the optimistic pre-dispatch render would draw an identical image, so
+/// we skip it to keep the press latency-free.
+fn has_active_style(mapping: &ButtonMapping) -> bool {
+    mapping.active_label.is_some()
+        || mapping.active_icon.is_some()
+        || mapping.active_fg.is_some()
+        || mapping.active_bg.is_some()
+}
+
 /// Shorten OBS command names for LCD display.
 fn shorten_obs_command(cmd: &str) -> String {
     match cmd {
@@ -343,25 +353,34 @@ async fn run_event_loop(
                         if dry_run {
                             tracing::info!(button = %btn, "Dry run: skipping action dispatch");
                         } else if let Some(mapping) = mapping {
-                            // Optimistic UI: toggle active state before webhook
+                            // Optimistic UI: render the active state before dispatch
+                            // ONLY for buttons with a distinct active look (e.g.
+                            // spotlight). For plain momentary buttons (media/hotkey/
+                            // shell) that render is a visually-identical device upload
+                            // that would just delay the action, so skip it.
+                            let optimistic_feedback = matches!(device_handle, DeviceHandle::StreamDeck(_))
+                                && has_active_style(mapping);
                             let old_active = button_active.get(&config_id).copied().unwrap_or(false);
-                            let optimistic = !old_active;
-                            if let DeviceHandle::StreamDeck(deck) = device_handle {
-                                button_active.insert(config_id, optimistic);
-                                render_streamdeck_button_state(mapping, deck, optimistic).await;
+                            if optimistic_feedback {
+                                if let DeviceHandle::StreamDeck(deck) = device_handle {
+                                    button_active.insert(config_id, !old_active);
+                                    render_streamdeck_button_state(mapping, deck, !old_active).await;
+                                }
                             }
 
                             let success = dispatch_mapping(mapping, obs_client, webhook_client).await;
 
                             // Rollback on failure
-                            if !success {
+                            if !success && optimistic_feedback {
                                 if let DeviceHandle::StreamDeck(deck) = device_handle {
                                     button_active.insert(config_id, old_active);
                                     render_streamdeck_button_state(mapping, deck, old_active).await;
                                 }
                             }
 
-                            if has_obs_buttons {
+                            // Only poll OBS after a press that actually targets OBS,
+                            // so a media/hotkey press never blocks on the OBS round-trip.
+                            if has_obs_buttons && matches!(mapping.action, Action::Obs { .. }) {
                                 if let DeviceHandle::MxCreative(Some(lcd)) = device_handle {
                                     update_button_states(config, *current_page, obs_client, lcd, mute_inputs, button_active).await;
                                 }
